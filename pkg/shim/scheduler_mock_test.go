@@ -36,6 +36,7 @@ import (
 	"github.com/apache/yunikorn-k8shim/pkg/cache"
 	"github.com/apache/yunikorn-k8shim/pkg/client"
 	"github.com/apache/yunikorn-k8shim/pkg/common"
+	"github.com/apache/yunikorn-k8shim/pkg/common/constants"
 	"github.com/apache/yunikorn-k8shim/pkg/common/events"
 	"github.com/apache/yunikorn-k8shim/pkg/common/utils"
 	"github.com/apache/yunikorn-k8shim/pkg/conf"
@@ -58,7 +59,6 @@ type MockScheduler struct {
 }
 
 func (fc *MockScheduler) init() {
-	conf.GetSchedulerConf().SetTestMode(true)
 	fc.stopChan = make(chan struct{})
 	serviceContext := entrypoint.StartAllServices()
 	fc.rmProxy = serviceContext.RMProxy
@@ -124,7 +124,7 @@ func (fc *MockScheduler) addNode(nodeName string, nodeLabels map[string]string, 
 		AddResource(siCommon.CPU, cpu).
 		AddResource("pods", pods).
 		Build()
-	request := common.CreateUpdateRequestForNewNode(nodeName, nodeLabels, nodeResource, nil, nil)
+	request := createUpdateRequestForNewNode(nodeName, nodeLabels, nodeResource, nil)
 	fmt.Printf("report new nodes to scheduler, request: %s", request.String())
 	return fc.apiProvider.GetAPIs().SchedulerAPI.UpdateNode(request)
 }
@@ -167,8 +167,7 @@ func (fc *MockScheduler) waitAndAssertTaskState(t *testing.T, appID, taskID, exp
 	assert.Equal(t, app != nil, true)
 	assert.Equal(t, app.GetApplicationID(), appID)
 
-	task, err := app.GetTask(taskID)
-	assert.NilError(t, err, "Task retrieval failed")
+	task := app.GetTask(taskID)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if task.GetTaskState() == expectedState {
@@ -319,11 +318,48 @@ func (fc *MockScheduler) waitForApplicationStateInCore(appID, partition, expecte
 	}, time.Second, 5*time.Second)
 }
 
+func (fc *MockScheduler) waitAndAssertForeignAllocationInCore(partition, allocationID, nodeID string, shouldExist bool) error {
+	return utils.WaitForCondition(func() bool {
+		node := fc.coreContext.Scheduler.GetClusterContext().GetNode(nodeID, partition)
+		if node == nil {
+			log.Log(log.Test).Warn("Node not found", zap.String("node ID", nodeID))
+			return false
+		}
+		allocs := node.GetForeignAllocations()
+		for _, alloc := range allocs {
+			if alloc.GetAllocationKey() == allocationID {
+				return shouldExist
+			}
+		}
+
+		return !shouldExist
+	}, time.Second, 5*time.Second)
+}
+
+func (fc *MockScheduler) waitAndAssertForeignAllocationResources(partition, allocationID, nodeID string, expected *si.Resource) error {
+	return utils.WaitForCondition(func() bool {
+		node := fc.coreContext.Scheduler.GetClusterContext().GetNode(nodeID, partition)
+		if node == nil {
+			log.Log(log.Test).Warn("Node not found", zap.String("node ID", nodeID))
+			return false
+		}
+		allocs := node.GetForeignAllocations()
+		for _, alloc := range allocs {
+			if alloc.GetAllocationKey() == allocationID {
+				current := alloc.GetAllocatedResource().ToProto()
+				return common.Equals(expected, current)
+			}
+		}
+
+		return false
+	}, time.Second, 5*time.Second)
+}
+
 func (fc *MockScheduler) getApplicationFromCore(appID, partition string) *objects.Application {
 	return fc.coreContext.Scheduler.GetClusterContext().GetApplication(appID, partition)
 }
 
-func (fc *MockScheduler) GetPodBindStats() client.BindStats {
+func (fc *MockScheduler) GetPodBindStats() *client.BindStats {
 	return fc.apiProvider.GetPodBindStats()
 }
 
@@ -334,5 +370,33 @@ func (fc *MockScheduler) GetBoundPods(clear bool) []client.BoundPod {
 func (fc *MockScheduler) ensureStarted() {
 	if !fc.started.Load() {
 		panic("mock scheduler is not started - call start() first")
+	}
+}
+func createUpdateRequestForNewNode(nodeID string, nodeLabels map[string]string, capacity *si.Resource, occupied *si.Resource) *si.NodeRequest {
+	// Use node's name as the NodeID, this is because when bind pod to node,
+	// name of node is required but uid is optional.
+	nodeInfo := &si.NodeInfo{
+		NodeID:              nodeID,
+		SchedulableResource: capacity,
+		Attributes: map[string]string{
+			constants.DefaultNodeAttributeHostNameKey: nodeID,
+			constants.DefaultNodeAttributeRackNameKey: constants.DefaultRackName,
+		},
+		Action: si.NodeInfo_CREATE,
+	}
+
+	// Add nodeLabels key value to Attributes map
+	for k, v := range nodeLabels {
+		nodeInfo.Attributes[k] = v
+	}
+
+	// Add instanceType to Attributes map
+	nodeInfo.Attributes[siCommon.InstanceType] = nodeLabels[conf.GetSchedulerConf().InstanceTypeNodeLabelKey]
+
+	nodes := make([]*si.NodeInfo, 1)
+	nodes[0] = nodeInfo
+	return &si.NodeRequest{
+		Nodes: nodes,
+		RmID:  conf.GetSchedulerConf().ClusterID,
 	}
 }

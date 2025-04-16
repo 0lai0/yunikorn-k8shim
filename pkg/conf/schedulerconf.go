@@ -82,7 +82,7 @@ const (
 	DefaultClusterID                       = "mycluster"
 	DefaultPolicyGroup                     = "queues"
 	DefaultSchedulingInterval              = time.Second
-	DefaultVolumeBindTimeout               = 10 * time.Second
+	DefaultVolumeBindTimeout               = 10 * time.Minute
 	DefaultEventChannelCapacity            = 1024 * 1024
 	DefaultDispatchTimeout                 = 300 * time.Second
 	DefaultOperatorPlugins                 = "general"
@@ -117,7 +117,6 @@ type SchedulerConf struct {
 	Interval                 time.Duration `json:"schedulingIntervalSecond"`
 	KubeConfig               string        `json:"absoluteKubeConfigFilePath"`
 	VolumeBindTimeout        time.Duration `json:"volumeBindTimeout"`
-	TestMode                 bool          `json:"testMode"`
 	EventChannelCapacity     int           `json:"eventChannelCapacity"`
 	DispatchTimeout          time.Duration `json:"dispatchTimeout"`
 	KubeQPS                  int           `json:"kubeQPS"`
@@ -145,7 +144,6 @@ func (conf *SchedulerConf) Clone() *SchedulerConf {
 		Interval:                 conf.Interval,
 		KubeConfig:               conf.KubeConfig,
 		VolumeBindTimeout:        conf.VolumeBindTimeout,
-		TestMode:                 conf.TestMode,
 		EventChannelCapacity:     conf.EventChannelCapacity,
 		DispatchTimeout:          conf.DispatchTimeout,
 		KubeQPS:                  conf.KubeQPS,
@@ -248,25 +246,13 @@ func checkNonReloadableBool(name string, old *bool, new *bool) {
 
 func GetSchedulerConf() *SchedulerConf {
 	once.Do(createConfigs)
-	return confHolder.Load().(*SchedulerConf)
+	return confHolder.Load().(*SchedulerConf) //nolint:errcheck
 }
 
 func SetSchedulerConf(conf *SchedulerConf) {
 	// this is just to ensure that the original is in place first
 	once.Do(createConfigs)
 	confHolder.Store(conf)
-}
-
-func (conf *SchedulerConf) SetTestMode(testMode bool) {
-	conf.Lock()
-	defer conf.Unlock()
-	conf.TestMode = testMode
-}
-
-func (conf *SchedulerConf) IsTestMode() bool {
-	conf.RLock()
-	defer conf.RUnlock()
-	return conf.TestMode
 }
 
 func (conf *SchedulerConf) IsConfigReloadable() bool {
@@ -321,7 +307,6 @@ func CreateDefaultConfig() *SchedulerConf {
 		Interval:                 DefaultSchedulingInterval,
 		KubeConfig:               GetDefaultKubeConfigPath(),
 		VolumeBindTimeout:        DefaultVolumeBindTimeout,
-		TestMode:                 false,
 		EventChannelCapacity:     DefaultEventChannelCapacity,
 		DispatchTimeout:          DefaultDispatchTimeout,
 		KubeQPS:                  DefaultKubeQPS,

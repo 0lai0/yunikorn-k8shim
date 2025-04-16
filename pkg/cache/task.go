@@ -21,7 +21,6 @@ package cache
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/looplab/fsm"
@@ -40,24 +39,27 @@ import (
 )
 
 type Task struct {
-	taskID          string
-	alias           string
-	applicationID   string
-	application     *Application
+	taskID        string
+	alias         string
+	applicationID string
+	application   *Application
+	podStatus     v1.PodStatus // pod status, maintained separately for efficiency reasons
+	context       *Context
+	createTime    time.Time
+	placeholder   bool
+	originator    bool
+	sm            *fsm.FSM
+
+	// mutable resources, require locking
 	allocationKey   string
+	nodeName        string
+	taskGroupName   string
+	terminationType string
+	schedulingState TaskSchedulingState
 	resource        *si.Resource
 	pod             *v1.Pod
-	podStatus       v1.PodStatus // pod status, maintained separately for efficiency reasons
-	context         *Context
-	nodeName        string
-	createTime      time.Time
-	taskGroupName   string
-	placeholder     bool
-	terminationType string
-	originator      bool
-	schedulingState TaskSchedulingState
-	sm              *fsm.FSM
-	lock            *locking.RWMutex
+
+	lock *locking.RWMutex
 }
 
 func NewTask(tid string, app *Application, ctx *Context, pod *v1.Pod) *Task {
@@ -135,14 +137,10 @@ func (task *Task) GetTaskPod() *v1.Pod {
 }
 
 func (task *Task) GetTaskID() string {
-	task.lock.RLock()
-	defer task.lock.RUnlock()
 	return task.taskID
 }
 
 func (task *Task) IsPlaceholder() bool {
-	task.lock.RLock()
-	defer task.lock.RUnlock()
 	return task.placeholder
 }
 
@@ -157,26 +155,32 @@ func (task *Task) setTaskGroupName(groupName string) {
 	task.taskGroupName = groupName
 }
 
-func (task *Task) setTaskTerminationType(terminationTyp string) {
+func (task *Task) setTaskTerminationType(terminationType string) {
 	task.lock.Lock()
 	defer task.lock.Unlock()
-	task.terminationType = terminationTyp
+	task.terminationType = terminationType
 }
 
-func (task *Task) getTaskGroupName() string {
+func (task *Task) GetTaskTerminationType() string {
+	task.lock.RLock()
+	defer task.lock.RUnlock()
+	return task.terminationType
+}
+
+func (task *Task) GetTaskGroupName() string {
 	task.lock.RLock()
 	defer task.lock.RUnlock()
 	return task.taskGroupName
 }
 
-func (task *Task) getNodeName() string {
+func (task *Task) GetNodeName() string {
 	task.lock.RLock()
 	defer task.lock.RUnlock()
 	return task.nodeName
 }
 
 func (task *Task) DeleteTaskPod() error {
-	return task.context.apiProvider.GetAPIs().KubeClient.Delete(task.pod)
+	return task.context.apiProvider.GetAPIs().KubeClient.Delete(task.GetTaskPod())
 }
 
 func (task *Task) UpdateTaskPodStatus(pod *v1.Pod) (*v1.Pod, error) {
@@ -222,8 +226,6 @@ func (task *Task) initialize() {
 }
 
 func (task *Task) IsOriginator() bool {
-	task.lock.RLock()
-	defer task.lock.RUnlock()
 	return task.originator
 }
 
@@ -286,46 +288,11 @@ func (task *Task) handleSubmitTaskEvent() {
 	log.Log(log.ShimCacheTask).Debug("scheduling pod",
 		zap.String("podName", task.pod.Name))
 
-	// build preemption policy
-	preemptionPolicy := &si.PreemptionPolicy{
-		AllowPreemptSelf:  task.isPreemptSelfAllowed(),
-		AllowPreemptOther: task.isPreemptOtherAllowed(),
-	}
+	// send update allocation event to core
+	task.updateAllocation()
 
-	if utils.PodAlreadyBound(task.pod) {
-		// submit allocation
-		rr := common.CreateAllocationForTask(
-			task.applicationID,
-			task.taskID,
-			task.pod.Spec.NodeName,
-			task.resource,
-			task.placeholder,
-			task.taskGroupName,
-			task.pod,
-			task.originator,
-			preemptionPolicy)
-		log.Log(log.ShimCacheTask).Debug("send update request", zap.Stringer("request", rr))
-		if err := task.context.apiProvider.GetAPIs().SchedulerAPI.UpdateAllocation(rr); err != nil {
-			log.Log(log.ShimCacheTask).Debug("failed to send allocation to scheduler", zap.Error(err))
-			return
-		}
-	} else {
-		// submit allocation ask
-		rr := common.CreateAllocationRequestForTask(
-			task.applicationID,
-			task.taskID,
-			task.resource,
-			task.placeholder,
-			task.taskGroupName,
-			task.pod,
-			task.originator,
-			preemptionPolicy)
-		log.Log(log.ShimCacheTask).Debug("send update request", zap.Stringer("request", rr))
-		if err := task.context.apiProvider.GetAPIs().SchedulerAPI.UpdateAllocation(rr); err != nil {
-			log.Log(log.ShimCacheTask).Debug("failed to send scheduling request to scheduler", zap.Error(err))
-			return
-		}
-
+	if !utils.PodAlreadyBound(task.pod) {
+		// if this is a new request, add events to pod
 		events.GetRecorder().Eventf(task.pod.DeepCopy(), nil, v1.EventTypeNormal, "Scheduling", "Scheduling",
 			"%s is queued and waiting for allocation", task.alias)
 		// if this task belongs to a task group, that means the app has gang scheduling enabled
@@ -335,6 +302,33 @@ func (task *Task) handleSubmitTaskEvent() {
 				v1.EventTypeNormal, "GangScheduling", "TaskGroupMatch",
 				"Pod belongs to the taskGroup %s, it will be scheduled as a gang member", task.taskGroupName)
 		}
+	}
+}
+
+// updateAllocation updates the core scheduler when task information changes.
+// This function must be called with the task lock held.
+func (task *Task) updateAllocation() {
+	// build preemption policy
+	preemptionPolicy := &si.PreemptionPolicy{
+		AllowPreemptSelf:  task.isPreemptSelfAllowed(),
+		AllowPreemptOther: task.isPreemptOtherAllowed(),
+	}
+
+	// submit allocation
+	rr := common.CreateAllocationForTask(
+		task.applicationID,
+		task.taskID,
+		task.pod.Spec.NodeName,
+		task.resource,
+		task.placeholder,
+		task.taskGroupName,
+		task.pod,
+		task.originator,
+		preemptionPolicy)
+	log.Log(log.ShimCacheTask).Debug("send update request", zap.Stringer("request", rr))
+	if err := task.context.apiProvider.GetAPIs().SchedulerAPI.UpdateAllocation(rr); err != nil {
+		log.Log(log.ShimCacheTask).Debug("failed to send allocation to scheduler", zap.Error(err))
+		return
 	}
 }
 
@@ -433,19 +427,8 @@ func (task *Task) postTaskBound() {
 	if utils.IsPluginMode() {
 		// When the pod is actively scheduled by YuniKorn, it can be  moved to the default-scheduler's
 		// UnschedulablePods structure. If the pod does not change, the pod will stay in the UnschedulablePods
-		// structure for podMaxInUnschedulablePodsDuration (default 5 minutes). Here we update the pod
-		// explicitly to move it back to the active queue.
-		// See: pkg/scheduler/internal/queue/scheduling_queue.go:isPodUpdated() for what is considered updated.
-		podCopy := task.pod.DeepCopy()
-		if _, err := task.UpdateTaskPod(podCopy, func(pod *v1.Pod) {
-			// Ensure that the default scheduler detects the pod as having changed
-			if pod.Annotations == nil {
-				pod.Annotations = make(map[string]string)
-			}
-			pod.Annotations[constants.DomainYuniKorn+"scheduled-at"] = strconv.FormatInt(time.Now().UnixNano(), 10)
-		}); err != nil {
-			log.Log(log.ShimCacheTask).Warn("failed to update pod status", zap.Error(err))
-		}
+		// structure for podMaxInUnschedulablePodsDuration (default 5 minutes). Here we explicitly activate the pod.
+		task.context.ActivatePod(task.pod)
 	}
 
 	if task.placeholder {
@@ -497,8 +480,10 @@ func (task *Task) beforeTaskCompleted() {
 		"Task %s is completed", task.alias)
 }
 
-// releaseAllocation sends the release request for the Allocation or the AllocationAsk to the core.
+// releaseAllocation sends the release request for the Allocation to the core.
 func (task *Task) releaseAllocation() {
+	terminationType := common.GetTerminationTypeFromString(task.terminationType)
+
 	// scheduler api might be nil in some tests
 	if task.context.apiProvider.GetAPIs().SchedulerAPI != nil {
 		log.Log(log.ShimCacheTask).Debug("prepare to send release request",
@@ -507,31 +492,35 @@ func (task *Task) releaseAllocation() {
 			zap.String("taskAlias", task.alias),
 			zap.String("allocationKey", task.allocationKey),
 			zap.String("task", task.GetTaskState()),
-			zap.String("terminationType", task.terminationType))
+			zap.String("terminationType", string(terminationType)))
 
-		// The message depends on current task state, generate requests accordingly.
-		// If allocated send an AllocationReleaseRequest,
-		// If not allocated yet send an AllocationAskReleaseRequest
+		// send an AllocationReleaseRequest
 		var releaseRequest *si.AllocationRequest
 		s := TaskStates()
-		switch task.GetTaskState() {
-		case s.New, s.Pending, s.Scheduling, s.Rejected:
-			releaseRequest = common.CreateReleaseRequestForTask(task.applicationID, task.taskID, task.allocationKey, task.application.partition, task.terminationType)
-		default:
+
+		// check if the task is in a state where it has not been allocated yet
+		if task.GetTaskState() != s.New && task.GetTaskState() != s.Pending &&
+			task.GetTaskState() != s.Scheduling && task.GetTaskState() != s.Rejected {
+			// task is in a state where it might have been allocated
 			if task.allocationKey == "" {
 				log.Log(log.ShimCacheTask).Warn("BUG: task allocationKey is empty on release",
 					zap.String("applicationID", task.applicationID),
 					zap.String("taskID", task.taskID),
 					zap.String("taskAlias", task.alias),
-					zap.String("task", task.GetTaskState()))
+					zap.String("taskState", task.GetTaskState()))
 			}
-			releaseRequest = common.CreateReleaseRequestForTask(
-				task.applicationID, task.taskID, task.allocationKey, task.application.partition, task.terminationType)
 		}
+
+		// create the release request
+		releaseRequest = common.CreateReleaseRequestForTask(
+			task.applicationID,
+			task.taskID,
+			task.application.partition,
+			terminationType,
+		)
 
 		if releaseRequest.Releases != nil {
 			log.Log(log.ShimCacheTask).Info("releasing allocations",
-				zap.Int("numOfAsksToRelease", len(releaseRequest.Releases.AllocationAsksToRelease)),
 				zap.Int("numOfAllocationsToRelease", len(releaseRequest.Releases.AllocationsToRelease)))
 		}
 		if err := task.context.apiProvider.GetAPIs().SchedulerAPI.UpdateAllocation(releaseRequest); err != nil {
@@ -544,9 +533,36 @@ func (task *Task) releaseAllocation() {
 // this reduces the scheduling overhead by blocking such
 // request away from the core scheduler.
 func (task *Task) sanityCheckBeforeScheduling() error {
+	// After version 1.7.0, we should reject the task whose pod is unbound and has conflicting metadata.
+	if !utils.PodAlreadyBound(task.pod) {
+		if err := utils.CheckAppIdInPod(task.pod); err != nil {
+			log.Log(log.ShimCacheTask).Warn("Pod has inconsistent application metadata and may be rejected in a future YuniKorn release",
+				zap.String("appID", task.applicationID),
+				zap.String("podName", task.pod.Name),
+				zap.String("error", err.Error()))
+
+			events.GetRecorder().Eventf(task.pod.DeepCopy(),
+				nil, v1.EventTypeWarning, "Scheduling", "Scheduling", fmt.Sprintf("Pod has inconsistent application metadata and may be rejected in a future YuniKorn release: %s", err.Error()))
+		}
+		if err := utils.CheckQueueNameInPod(task.pod); err != nil {
+			log.Log(log.ShimCacheTask).Warn("Pod has inconsistent queue metadata and may be rejected in a future YuniKorn release",
+				zap.String("appID", task.applicationID),
+				zap.String("podName", task.pod.Name),
+				zap.String("error", err.Error()))
+
+			events.GetRecorder().Eventf(task.pod.DeepCopy(),
+				nil, v1.EventTypeWarning, "Scheduling", "Scheduling", fmt.Sprintf("Pod has inconsistent queue metadata and may be rejected in a future YuniKorn release: %s", err.Error()))
+		}
+	}
+	return task.checkPodPVCs()
+}
+
+func (task *Task) checkPodPVCs() error {
+	task.lock.RLock()
 	// Check PVCs used by the pod
 	namespace := task.pod.Namespace
 	manifest := &(task.pod.Spec)
+	task.lock.RUnlock()
 	for i := range manifest.Volumes {
 		volume := &manifest.Volumes[i]
 		if volume.PersistentVolumeClaim == nil {
@@ -588,14 +604,42 @@ func (task *Task) UpdatePodCondition(podCondition *v1.PodCondition) (bool, *v1.P
 	return false, pod
 }
 
+func (task *Task) GetAllocationKey() string {
+	task.lock.RLock()
+	defer task.lock.RUnlock()
+	return task.allocationKey
+}
+
 func (task *Task) setAllocationKey(allocationKey string) {
 	task.lock.Lock()
 	defer task.lock.Unlock()
 	task.allocationKey = allocationKey
 }
 
+func (task *Task) FailWithEvent(errorMessage, actionReason string) {
+	task.lock.RLock()
+	defer task.lock.RUnlock()
+	task.failWithEvent(errorMessage, actionReason)
+}
+
 func (task *Task) failWithEvent(errorMessage, actionReason string) {
 	dispatcher.Dispatch(NewFailTaskEvent(task.applicationID, task.taskID, errorMessage))
 	events.GetRecorder().Eventf(task.pod.DeepCopy(),
 		nil, v1.EventTypeWarning, actionReason, actionReason, errorMessage)
+}
+
+func (task *Task) SetTaskPod(pod *v1.Pod) {
+	task.lock.Lock()
+	defer task.lock.Unlock()
+
+	task.pod = pod
+	oldResource := task.resource
+	newResource := common.GetPodResource(pod)
+	if !common.Equals(oldResource, newResource) {
+		// pod resources have changed
+		task.resource = newResource
+
+		// update allocation in core
+		task.updateAllocation()
+	}
 }

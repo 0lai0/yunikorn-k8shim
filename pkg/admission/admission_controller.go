@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -422,7 +423,7 @@ func (c *AdmissionController) updateLabels(namespace string, pod *v1.Pod, patch 
 		zap.String("namespace", namespace),
 		zap.Any("labels", pod.Labels))
 
-	result := updatePodLabel(pod, namespace, c.conf.GetGenerateUniqueAppIds(), c.conf.GetDefaultQueueName())
+	result := updatePodLabel(pod, namespace, c.conf.GetGenerateUniqueAppIds())
 
 	patch = append(patch, common.PatchOperation{
 		Op:    "add",
@@ -607,7 +608,7 @@ func (c *AdmissionController) validateConfigMap(namespace string, cm *v1.ConfigM
 		return nil
 	}
 	if !responseData.Allowed {
-		err = fmt.Errorf(responseData.Reason)
+		err = errors.New(responseData.Reason)
 		log.Log(log.Admission).Error("Configmap validation failed, aborting", zap.Error(err))
 		return err
 	}

@@ -47,7 +47,7 @@ var (
 	AsyncDispatchLimit         int32
 	AsyncDispatchCheckInterval = 3 * time.Second
 	DispatchTimeout            time.Duration
-	asyncDispatchCount         int32 = 0
+	asyncDispatchCount         atomic.Int32 = atomic.Int32{}
 )
 
 // central dispatcher that dispatches scheduling events.
@@ -55,7 +55,7 @@ type Dispatcher struct {
 	eventChan chan events.SchedulingEvent
 	stopChan  chan struct{}
 	handlers  map[EventType]map[string]func(interface{})
-	running   atomic.Value
+	running   atomic.Bool
 	lock      locking.RWMutex
 	stopped   sync.WaitGroup
 }
@@ -66,12 +66,11 @@ func initDispatcher() {
 		eventChan: make(chan events.SchedulingEvent, eventChannelCapacity),
 		handlers:  make(map[EventType]map[string]func(interface{})),
 		stopChan:  make(chan struct{}),
-		running:   atomic.Value{},
 		lock:      locking.RWMutex{},
 	}
 	dispatcher.setRunning(false)
 	DispatchTimeout = conf.GetSchedulerConf().DispatchTimeout
-	AsyncDispatchLimit = max(10000, int32(eventChannelCapacity/10))
+	AsyncDispatchLimit = max(10000, int32(eventChannelCapacity/10)) //nolint:gosec
 
 	log.Log(log.ShimDispatcher).Info("Init dispatcher",
 		zap.Int("EventChannelCapacity", eventChannelCapacity),
@@ -146,7 +145,7 @@ func Dispatch(event events.SchedulingEvent) {
 }
 
 func (p *Dispatcher) isRunning() bool {
-	return p.running.Load().(bool)
+	return p.running.Load()
 }
 
 func (p *Dispatcher) setRunning(flag bool) {
@@ -169,14 +168,14 @@ func (p *Dispatcher) dispatch(event events.SchedulingEvent) error {
 // async-dispatch try to enqueue the event in every 3 seconds util timeout,
 // it's only called when event channel is full.
 func (p *Dispatcher) asyncDispatch(event events.SchedulingEvent) {
-	count := atomic.AddInt32(&asyncDispatchCount, 1)
+	count := asyncDispatchCount.Add(1)
 	log.Log(log.ShimDispatcher).Warn("event channel is full, transition to async-dispatch mode",
 		zap.Int32("asyncDispatchCount", count))
 	if count > AsyncDispatchLimit {
 		panic(fmt.Errorf("dispatcher exceeds async-dispatch limit"))
 	}
 	go func(beginTime time.Time, stop chan struct{}) {
-		defer atomic.AddInt32(&asyncDispatchCount, -1)
+		defer asyncDispatchCount.Add(-1)
 		for p.isRunning() {
 			select {
 			case <-stop:

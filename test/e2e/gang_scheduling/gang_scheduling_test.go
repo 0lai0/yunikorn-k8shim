@@ -19,6 +19,8 @@
 package gangscheduling_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +31,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/apache/yunikorn-core/pkg/webservice/dao"
 	"github.com/apache/yunikorn-k8shim/pkg/cache"
@@ -96,9 +99,8 @@ var _ = Describe("", func() {
 		checkAppStatus(appID, yunikorn.States().Application.Running)
 
 		// Ensure placeholders are created
-		appDaoInfo, appDaoInfoErr := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
-		Ω(appDaoInfoErr).NotTo(HaveOccurred())
-		checkPlaceholderData(appDaoInfo, groupA, 5, 0, 0)
+		phErr := waitForPlaceholderData(nsQueue, appID, groupA, 5, 0, 0, 30)
+		Ω(phErr).NotTo(HaveOccurred())
 
 		// Deploy job, now with 5 pods part of taskGroup
 		By("Deploy second job with 5 real taskGroup pods")
@@ -118,9 +120,8 @@ var _ = Describe("", func() {
 		checkAppStatus(appID, yunikorn.States().Application.Running)
 
 		// Ensure placeholders are replaced
-		appDaoInfo, appDaoInfoErr = restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
-		Ω(appDaoInfoErr).NotTo(HaveOccurred())
-		checkPlaceholderData(appDaoInfo, groupA, 5, 5, 0)
+		phErr = waitForPlaceholderData(nsQueue, appID, groupA, 5, 5, 0, 30)
+		Ω(phErr).NotTo(HaveOccurred())
 	})
 
 	// Test to verify multiple task group nodes
@@ -218,9 +219,10 @@ var _ = Describe("", func() {
 		Ω(phTermErr).NotTo(HaveOccurred())
 
 		// Ensure placeholders are replaced and allocations count is correct
+		phErr := waitForPlaceholderData(nsQueue, appID, groupA, 3, 3, 0, 30)
+		Ω(phErr).NotTo(HaveOccurred())
 		appDaoInfo, appDaoInfoErr := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
 		Ω(appDaoInfoErr).NotTo(HaveOccurred())
-		checkPlaceholderData(appDaoInfo, groupA, 3, 3, 0)
 		Ω(len(appDaoInfo.Allocations)).To(Equal(int(6)), "Allocations count is not correct")
 	})
 
@@ -250,11 +252,13 @@ var _ = Describe("", func() {
 		checkAppStatus(appID, yunikorn.States().Application.Running)
 
 		// Ensure placeholders are timed out and allocations count is correct as app started running normal because of 'soft' gang style
+		phErr := waitForPlaceholderData(nsQueue, appID, groupA, 3, 0, 3, 30)
+		Ω(phErr).NotTo(HaveOccurred())
+		phErr = waitForPlaceholderData(nsQueue, appID, groupB, 1, 0, 1, 30)
+		Ω(phErr).NotTo(HaveOccurred())
 		appDaoInfo, appDaoInfoErr := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
 		Ω(appDaoInfoErr).NotTo(HaveOccurred())
 		Ω(len(appDaoInfo.PlaceholderData)).To(Equal(2), "Placeholder count is not correct")
-		checkPlaceholderData(appDaoInfo, groupA, 3, 0, 3)
-		checkPlaceholderData(appDaoInfo, groupB, 1, 0, 1)
 		Ω(len(appDaoInfo.Allocations)).To(Equal(int(3)), "Allocations count is not correct")
 		for _, alloc := range appDaoInfo.Allocations {
 			Ω(alloc.Placeholder).To(Equal(false), "Allocation should be non placeholder")
@@ -445,7 +449,7 @@ var _ = Describe("", func() {
 		}
 
 		// Verify queue resources = 0
-		qInfo, qErr := restClient.GetQueue(configmanager.DefaultPartition, nsQueue)
+		qInfo, qErr := restClient.GetQueue(configmanager.DefaultPartition, nsQueue, false)
 		Ω(qErr).NotTo(HaveOccurred())
 		var usedResource yunikorn.ResourceUsage
 		var usedPercentageResource yunikorn.ResourceUsage
@@ -563,12 +567,89 @@ var _ = Describe("", func() {
 		checkAppStatus(appID, yunikorn.States().Application.Running)
 
 		// Ensure placeholders are replaced and allocations count is correct
+		phErr := waitForPlaceholderData(nsQueue, appID, groupA, 3, 3, 0, 30)
+		Ω(phErr).NotTo(HaveOccurred())
 		appDaoInfo, appDaoInfoErr := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
 		Ω(appDaoInfoErr).NotTo(HaveOccurred())
 		Ω(len(appDaoInfo.PlaceholderData)).To(Equal(1), "Placeholder count is not correct")
-		checkPlaceholderData(appDaoInfo, groupA, 3, 3, 0)
 		Ω(len(appDaoInfo.Allocations)).To(Equal(int(3)), "Allocations count is not correct")
 		Ω(appDaoInfo.UsedResource[hugepageKey]).To(Equal(int64(314572800)), "Used huge page resource is not correct")
+	})
+
+	// Test to verify that the gang app originator pod does not change after a restart
+	// 1. Create an originator pod
+	// 2. Verify the originator pod is not a placeholder pod
+	// 3. Restart YuniKorn
+	// 4. Verify the originator pod is not changed after restart
+	It("Verify_Gang_App_Originator_Pod_Does_Not_Change_After_Restart", func() {
+		placeholderCount := 5
+
+		By("Create an originator pod")
+		podConf := k8s.TestPodConfig{
+			Name: "gang-driver-pod-" + common.RandSeq(5),
+			Labels: map[string]string{
+				"app":           "sleep-" + common.RandSeq(5),
+				"applicationId": appID,
+			},
+			Annotations: &k8s.PodAnnotation{
+				TaskGroups: []cache.TaskGroup{
+					{Name: groupA, MinMember: int32(placeholderCount), MinResource: minResource},
+				},
+			},
+			Resources: &v1.ResourceRequirements{
+				Requests: v1.ResourceList{"cpu": minResource["cpu"], "memory": minResource["memory"]},
+			},
+		}
+		podTest, err := k8s.InitTestPod(podConf)
+		Ω(err).NotTo(HaveOccurred())
+		originator, err := kClient.CreatePod(podTest, ns)
+		Ω(err).NotTo(HaveOccurred())
+
+		// Wait for the app to be created
+		checkAppStatus(appID, yunikorn.States().Application.Running)
+
+		By("Ensure all pods are allocated")
+		err = restClient.WaitForAllExecPodsAllocated(configmanager.DefaultPartition, nsQueue, appID, 1+placeholderCount, 30)
+		Ω(err).NotTo(HaveOccurred())
+
+		By("Verify the originator pod is not a placeholder pod")
+		appDaoInfo, appDaoInfoErr := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
+		Ω(appDaoInfoErr).NotTo(HaveOccurred())
+		for _, alloc := range appDaoInfo.Allocations {
+			podName := alloc.AllocationTags["kubernetes.io/meta/podName"]
+			if podName == originator.Name {
+				Ω(alloc.Originator).To(Equal(true), "Originator pod should be a originator pod")
+				Ω(alloc.Placeholder).To(Equal(false), "Originator pod should not be a placeholder pod")
+			} else {
+				Ω(alloc.Originator).To(Equal(false), "Placeholder pod should not be a originator pod")
+				Ω(alloc.Placeholder).To(Equal(true), "Placeholder pod should be a placeholder pod")
+			}
+		}
+
+		By("Restart the scheduler pod")
+		yunikorn.RestartYunikorn(&kClient)
+		yunikorn.RestorePortForwarding(&kClient)
+
+		// Wait for the app to be created
+		checkAppStatus(appID, yunikorn.States().Application.Running)
+
+		By("Ensure all pods are allocated")
+		err = restClient.WaitForAllExecPodsAllocated(configmanager.DefaultPartition, nsQueue, appID, 1+placeholderCount, 30)
+		Ω(err).NotTo(HaveOccurred())
+
+		By("Verify the originator pod is not changed after restart")
+		appDaoInfo, appDaoInfoErr = restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
+		Ω(appDaoInfoErr).NotTo(HaveOccurred())
+		for _, alloc := range appDaoInfo.Allocations {
+			podName := alloc.AllocationTags["kubernetes.io/meta/podName"]
+			if podName == originator.Name {
+				Ω(alloc.Originator).To(Equal(true), "Originator pod should be a originator pod")
+				Ω(alloc.Placeholder).To(Equal(false), "Originator pod should not be a placeholder pod")
+			} else {
+				Ω(alloc.Originator).To(Equal(false), "Placeholder pod should not be a originator pod")
+				Ω(alloc.Placeholder).To(Equal(true), "Placeholder pod should be a placeholder pod")
+			}
+		}
 	})
 
 	AfterEach(func() {
@@ -649,7 +730,40 @@ func checkCompletedAppStatus(applicationID, state string) {
 	Ω(timeoutErr).NotTo(HaveOccurred())
 }
 
-func checkPlaceholderData(appDaoInfo *dao.ApplicationDAOInfo, tgName string, count, replaced, timeout int) {
+func waitForPlaceholderData(nsQueue string, appID string, tgName string, count, replaced, timedOut, timeout int) error {
+	lastOk := false
+	var lastCount, lastReplaced, lastTimedOut int
+
+	err := wait.PollUntilContextTimeout(context.Background(), 2*time.Second, time.Duration(timeout)*time.Second, false, func(c context.Context) (bool, error) {
+		appDaoInfo, err := restClient.GetAppInfo(configmanager.DefaultPartition, nsQueue, appID)
+		if err != nil {
+			return false, err
+		}
+		lastOk, lastCount, lastReplaced, lastTimedOut = getPlaceholderData(appDaoInfo, tgName)
+		return lastOk && lastCount == count && lastReplaced == replaced && lastTimedOut == timedOut, nil
+	})
+	if err != nil {
+		errs := make([]error, 0)
+		errs = append(errs, err)
+		if !lastOk {
+			errs = append(errs, fmt.Errorf("can't find task group %s in app info", tgName))
+		}
+		if lastCount != count {
+			errs = append(errs, fmt.Errorf("placeholder count is incorrect (expected %d, got %d)", count, lastCount))
+		}
+		if lastReplaced != replaced {
+			errs = append(errs, fmt.Errorf("placeholder replaced is incorrect (expected %d, got %d)", replaced, lastReplaced))
+		}
+		if lastTimedOut != timedOut {
+			errs = append(errs, fmt.Errorf("placeholder timedout is incorrect (expected %d, got %d)", timedOut, lastTimedOut))
+		}
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func checkPlaceholderData(appDaoInfo *dao.ApplicationDAOInfo, tgName string, count int, replaced int, timeout int) {
+	By(fmt.Sprintf("Verify application %s placeholder data for group %s", appDaoInfo.ApplicationID, tgName))
 	verified := false
 	for _, placeholderData := range appDaoInfo.PlaceholderData {
 		if tgName == placeholderData.TaskGroupName {
@@ -661,6 +775,15 @@ func checkPlaceholderData(appDaoInfo *dao.ApplicationDAOInfo, tgName string, cou
 		}
 	}
 	Ω(verified).To(Equal(true), fmt.Sprintf("Can't find task group %s in app info", tgName))
+}
+
+func getPlaceholderData(appDaoInfo *dao.ApplicationDAOInfo, tgName string) (bool, int, int, int) {
+	for _, placeholderData := range appDaoInfo.PlaceholderData {
+		if tgName == placeholderData.TaskGroupName {
+			return true, int(placeholderData.Count), int(placeholderData.Replaced), int(placeholderData.TimedOut)
+		}
+	}
+	return false, 0, 0, 0
 }
 
 func verifyOriginatorDeletionCase(withOwnerRef bool) {

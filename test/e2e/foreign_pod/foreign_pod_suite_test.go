@@ -16,7 +16,7 @@
  limitations under the License.
 */
 
-package persistent_volume
+package foreign_pod
 
 import (
 	"path/filepath"
@@ -26,6 +26,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/reporters"
 	"github.com/onsi/gomega"
+	v1 "k8s.io/api/core/v1"
 
 	"github.com/apache/yunikorn-k8shim/test/e2e/framework/configmanager"
 	"github.com/apache/yunikorn-k8shim/test/e2e/framework/helpers/common"
@@ -37,41 +38,52 @@ func init() {
 	configmanager.YuniKornTestConfig.ParseFlags()
 }
 
-func TestPersistentVolume(t *testing.T) {
-	ginkgo.ReportAfterSuite("TestPersistentVolume", func(report ginkgo.Report) {
-		err := reporters.GenerateJUnitReportWithConfig(
+func TestForeignPodHandling(t *testing.T) {
+	ginkgo.ReportAfterSuite("TestForeignPodHandling", func(report ginkgo.Report) {
+		err := common.CreateJUnitReportDir()
+		Ω(err).NotTo(gomega.HaveOccurred())
+		err = reporters.GenerateJUnitReportWithConfig(
 			report,
-			filepath.Join(configmanager.YuniKornTestConfig.LogDir, "TEST-persistent_volume_junit.xml"),
+			filepath.Join(configmanager.YuniKornTestConfig.LogDir, "TEST-foreign_pod_junit.xml"),
 			reporters.JunitReportConfig{OmitSpecLabels: true},
 		)
 		Ω(err).NotTo(HaveOccurred())
 	})
 	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "TestPersistentVolume", ginkgo.Label("TestPersistentVolume"))
+	ginkgo.RunSpecs(t, "TestForeignPodHandling", ginkgo.Label("TestForeignPodHandling"))
 }
 
-var Ω = gomega.Ω
-var HaveOccurred = gomega.HaveOccurred
-var dev string
+var suiteName string
+var oldConfigMap = new(v1.ConfigMap)
+var kClient = k8s.KubeCtl{} //nolint
 
-var _ = ginkgo.BeforeSuite(func() {
+var _ = BeforeSuite(func() {
 	_, filename, _, _ := runtime.Caller(0)
 	suiteName = common.GetSuiteName(filename)
-	// Initializing kubectl client
-	kClient = k8s.KubeCtl{}
-	Ω(kClient.SetClient()).To(gomega.BeNil())
-
-	// Initializing rest client
-	restClient = yunikorn.RClient{}
-	Ω(restClient).NotTo(gomega.BeNil())
 	yunikorn.EnsureYuniKornConfigsPresent()
+	yunikorn.UpdateConfigMapWrapper(oldConfigMap, "fifo")
 })
 
-var _ = ginkgo.AfterSuite(func() {
-	// Clean up
-	ginkgo.By("Deleting PVCs and PVs")
-	err := kClient.DeletePVCs(dev)
-	err2 := kClient.DeletePVs(dev)
-	Ω(err).NotTo(HaveOccurred())
-	Ω(err2).NotTo(HaveOccurred())
+var _ = AfterSuite(func() {
+	yunikorn.RestoreConfigMapWrapper(oldConfigMap)
 })
+
+// Declarations for Ginkgo DSL
+var Describe = ginkgo.Describe
+
+var It = ginkgo.It
+var PIt = ginkgo.PIt
+var By = ginkgo.By
+var BeforeSuite = ginkgo.BeforeSuite
+var AfterSuite = ginkgo.AfterSuite
+var BeforeEach = ginkgo.BeforeEach
+var AfterEach = ginkgo.AfterEach
+var DescribeTable = ginkgo.Describe
+var Entry = ginkgo.Entry
+
+// Declarations for Gomega Matchers
+var Equal = gomega.Equal
+var BeNumerically = gomega.BeNumerically
+var Ω = gomega.Expect
+var BeNil = gomega.BeNil
+var HaveOccurred = gomega.HaveOccurred

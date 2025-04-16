@@ -26,6 +26,14 @@ import (
 const True = "true"
 const False = "false"
 
+// Kubernetes
+const Label = "label"
+const Annotation = "annotation"
+
+// KEP-1287 (in-place update of pod resources)
+const PodStatusPodResizing = "PodResizing"
+const PodStatusPodResizePending = "PodResizePending"
+
 // Cluster
 const DefaultNodeAttributeHostNameKey = "si.io/hostname"
 const DefaultNodeAttributeRackNameKey = "si.io/rackname"
@@ -44,7 +52,6 @@ const RootQueue = "root"
 const AnnotationQueueName = DomainYuniKorn + "queue"
 const CanonicalLabelQueueName = DomainYuniKorn + "queue"
 const AnnotationParentQueue = DomainYuniKorn + "parentqueue"
-const ApplicationDefaultQueue = "root.default"
 const DefaultPartition = "default"
 const AppTagNamespace = "namespace"
 const AppTagNamespaceParentQueue = "namespace.parentqueue"
@@ -63,6 +70,7 @@ const SchedulerName = "yunikorn"
 
 // OwnerReferences
 const DaemonSetType = "DaemonSet"
+const NodeKind = "Node"
 
 // Gang scheduling
 const PlaceholderContainerImage = "registry.k8s.io/pause:3.7"
@@ -98,6 +106,9 @@ const NamespaceQuota = DomainYuniKorn + "namespace.quota"
 // NamespaceGuaranteed Namespace Guaranteed
 const NamespaceGuaranteed = DomainYuniKorn + "namespace.guaranteed"
 
+// NamespaceMaxApps Namespace Max Apps
+const NamespaceMaxApps = DomainYuniKorn + "namespace.maxApps"
+
 // AnnotationAllowPreemption set on PriorityClass, opt out of preemption for pods with this priority class
 const AnnotationAllowPreemption = DomainYuniKorn + "allow-preemption"
 
@@ -122,3 +133,9 @@ const AutoGenAppSuffix = "autogen"
 
 // Compression Algorithms for schedulerConfig
 const GzipSuffix = "gz"
+
+// The key list which are used to identify the application ID or queue name in pod.
+var AppIdLabelKeys = []string{CanonicalLabelApplicationID, SparkLabelAppID, LabelApplicationID}
+var AppIdAnnotationKeys = []string{AnnotationApplicationID}
+var QueueLabelKeys = []string{CanonicalLabelQueueName, LabelQueueName}
+var QueueAnnotationKeys = []string{AnnotationQueueName}

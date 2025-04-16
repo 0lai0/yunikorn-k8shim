@@ -21,6 +21,7 @@ package shim
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"gotest.tools/v3/assert"
 	v1 "k8s.io/api/core/v1"
@@ -38,8 +39,7 @@ import (
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
-func TestApplicationScheduling(t *testing.T) {
-	configData := `
+const configData = `
 partitions:
   - name: default
     queues:
@@ -55,6 +55,8 @@ partitions:
                 memory: 150000000
                 vcore: 20
 `
+
+func TestApplicationScheduling(t *testing.T) {
 	// init and register scheduler
 	cluster := MockScheduler{}
 	cluster.init()
@@ -110,22 +112,6 @@ partitions:
 }
 
 func TestRejectApplications(t *testing.T) {
-	configData := `
-partitions:
-  - name: default
-    queues:
-      - name: root
-        submitacl: "*"
-        queues:
-          - name: a
-            resources:
-              guaranteed:
-                memory: 100000000
-                vcore: 10
-              max:
-                memory: 150000000
-                vcore: 20
-`
 	// init and register scheduler
 	cluster := MockScheduler{}
 	cluster.init()
@@ -191,25 +177,6 @@ func TestSchedulerRegistrationFailed(t *testing.T) {
 }
 
 func TestTaskFailures(t *testing.T) {
-	configData := `
-partitions:
- -
-   name: default
-   queues:
-     -
-       name: root
-       submitacl: "*"
-       queues:
-         -
-           name: a
-           resources:
-             guaranteed:
-               memory: 100000000
-               vcore: 10
-             max:
-               memory: 100000000
-               vcore: 10
-`
 	// init and register scheduler
 	cluster := MockScheduler{}
 	cluster.init()
@@ -261,22 +228,6 @@ partitions:
 
 // simulate PVC error during Context.AssumePod() call
 func TestAssumePodError(t *testing.T) {
-	configData := `
-partitions:
-  - name: default
-    queues:
-      - name: root
-        submitacl: "*"
-        queues:
-          - name: a
-            resources:
-              guaranteed:
-                memory: 100000000
-                vcore: 10
-              max:
-                memory: 150000000
-                vcore: 20
-`
 	cluster := MockScheduler{}
 	cluster.init()
 	binder := test.NewVolumeBinderMock()
@@ -303,6 +254,90 @@ partitions:
 	app := cluster.getApplicationFromCore("app0001", partitionName)
 	assert.Equal(t, 0, len(app.GetAllRequests()), "asks were not removed from the application")
 	assert.Equal(t, 0, len(app.GetAllAllocations()), "allocations were not removed from the application")
+}
+
+func TestForeignPodTracking(t *testing.T) {
+	cluster := MockScheduler{}
+	cluster.init()
+	assert.NilError(t, cluster.start(), "failed to start cluster")
+	defer cluster.stop()
+
+	err := cluster.updateConfig(configData, nil)
+	assert.NilError(t, err, "update config failed")
+	addNode(&cluster, "node-1")
+
+	podResource := common.NewResourceBuilder().
+		AddResource(siCommon.Memory, 1000).
+		AddResource(siCommon.CPU, 1).
+		Build()
+	pod1 := createTestPod("root.a", "", "foreign-1", podResource)
+	pod1.Spec.SchedulerName = ""
+	pod1.Spec.NodeName = "node-1"
+	pod2 := createTestPod("root.a", "", "foreign-2", podResource)
+	pod2.Spec.SchedulerName = ""
+	pod2.Spec.NodeName = "node-1"
+
+	cluster.AddPod(pod1)
+	cluster.AddPod(pod2)
+
+	err = cluster.waitAndAssertForeignAllocationInCore(partitionName, "foreign-1", "node-1", true)
+	assert.NilError(t, err)
+	err = cluster.waitAndAssertForeignAllocationInCore(partitionName, "foreign-2", "node-1", true)
+	assert.NilError(t, err)
+
+	// update pod resources
+	pod1Copy := pod1.DeepCopy()
+	pod1Copy.Spec.Containers[0].Resources.Requests[siCommon.Memory] = *resource.NewQuantity(500, resource.DecimalSI)
+	pod1Copy.Spec.Containers[0].Resources.Requests[siCommon.CPU] = *resource.NewMilliQuantity(2000, resource.DecimalSI)
+
+	cluster.UpdatePod(pod1, pod1Copy)
+	expectedUsage := common.NewResourceBuilder().
+		AddResource(siCommon.Memory, 500).
+		AddResource(siCommon.CPU, 2).
+		AddResource("pods", 1).
+		Build()
+	err = cluster.waitAndAssertForeignAllocationResources(partitionName, "foreign-1", "node-1", expectedUsage)
+	assert.NilError(t, err)
+
+	// delete pods
+	cluster.DeletePod(pod1)
+	cluster.DeletePod(pod2)
+
+	err = cluster.waitAndAssertForeignAllocationInCore(partitionName, "foreign-1", "node-1", false)
+	assert.NilError(t, err)
+	err = cluster.waitAndAssertForeignAllocationInCore(partitionName, "foreign-2", "node-1", false)
+	assert.NilError(t, err)
+}
+
+func TestSchedulingGates(t *testing.T) {
+	cluster := MockScheduler{}
+	cluster.init()
+	assert.NilError(t, cluster.start(), "failed to start cluster")
+	defer cluster.stop()
+
+	err := cluster.updateConfig(configData, nil)
+	assert.NilError(t, err, "update config failed")
+	addNode(&cluster, "node-1")
+
+	podResource := common.NewResourceBuilder().
+		AddResource(siCommon.Memory, 50000000).
+		AddResource(siCommon.CPU, 5).
+		Build()
+	pod1 := createTestPod("root.a", "app0001", "task0001", podResource)
+	pod1.Spec.SchedulingGates = []v1.PodSchedulingGate{{Name: "gate"}}
+
+	cluster.AddPod(pod1)
+	time.Sleep(time.Second)
+	app := cluster.context.GetApplication("app0001")
+	assert.Assert(t, app == nil, "application should not exist in the shim")
+	coreApp := cluster.getApplicationFromCore("app0001", partitionName)
+	assert.Assert(t, coreApp == nil, "application should not exist in the core")
+
+	pod1Upd := pod1.DeepCopy()
+	pod1Upd.Spec.SchedulingGates = nil
+	cluster.UpdatePod(pod1, pod1Upd)
+	err = cluster.waitForApplicationStateInCore("app0001", partitionName, "Running")
+	assert.NilError(t, err, "application has not transitioned to Running state")
 }
 
 func createTestPod(queue string, appID string, taskID string, taskResource *si.Resource) *v1.Pod {

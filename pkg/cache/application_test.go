@@ -38,7 +38,6 @@ import (
 	"github.com/apache/yunikorn-k8shim/pkg/common/constants"
 	"github.com/apache/yunikorn-k8shim/pkg/common/events"
 	"github.com/apache/yunikorn-k8shim/pkg/common/utils"
-	"github.com/apache/yunikorn-k8shim/pkg/conf"
 	"github.com/apache/yunikorn-k8shim/pkg/dispatcher"
 	"github.com/apache/yunikorn-k8shim/pkg/locking"
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/api"
@@ -132,8 +131,6 @@ func TestFailApplication(t *testing.T) {
 		lock: &locking.RWMutex{},
 	}
 	ms := &mockSchedulerAPI{}
-	// set test mode
-	conf.GetSchedulerConf().SetTestMode(true)
 	// set Recorder to mocked type
 	mr := events.NewMockedRecorder()
 	mr.OnEventf = func() {
@@ -142,6 +139,7 @@ func TestFailApplication(t *testing.T) {
 		rt.time++
 	}
 	events.SetRecorder(mr)
+	defer events.SetRecorder(events.NewMockedRecorder())
 	resources := make(map[v1.ResourceName]resource.Quantity)
 	containers := make([]v1.Container, 0)
 	containers = append(containers, v1.Container{
@@ -203,8 +201,6 @@ func TestFailApplication(t *testing.T) {
 	assert.NilError(t, err)
 	assertAppState(t, app2, ApplicationStates().Failed, 3*time.Second)
 	assert.Equal(t, rt.time, int64(0))
-	// Test over, set Recorder back fake type
-	events.SetRecorder(k8sEvents.NewFakeRecorder(1024))
 }
 
 func TestSetUnallocatedPodsToFailedWhenFailApplication(t *testing.T) {
@@ -228,11 +224,10 @@ func TestSetUnallocatedPodsToFailedWhenFailApplication(t *testing.T) {
 	context.apiProvider.GetAPIs().KubeClient = mockClient
 
 	ms := &mockSchedulerAPI{}
-	// set test mode
-	conf.GetSchedulerConf().SetTestMode(true)
 	// set Recorder to mocked type
 	mr := events.NewMockedRecorder()
 	events.SetRecorder(mr)
+	defer events.SetRecorder(events.NewMockedRecorder())
 	resources := make(map[v1.ResourceName]resource.Quantity)
 	containers := make([]v1.Container, 0)
 	containers = append(containers, v1.Container{
@@ -311,8 +306,6 @@ func TestSetUnallocatedPodsToFailedWhenFailApplication(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, newPod3.Status.Phase, v1.PodFailed, 3*time.Second)
 	assert.Equal(t, newPod3.Status.Reason, constants.ApplicationInsufficientResourcesFailure, 3*time.Second)
-	// Test over, set Recorder back fake type
-	events.SetRecorder(k8sEvents.NewFakeRecorder(1024))
 }
 
 func TestSetUnallocatedPodsToFailedWhenRejectApplication(t *testing.T) {
@@ -336,11 +329,10 @@ func TestSetUnallocatedPodsToFailedWhenRejectApplication(t *testing.T) {
 	defer mgr.Stop()
 
 	ms := &mockSchedulerAPI{}
-	// set test mode
-	conf.GetSchedulerConf().SetTestMode(true)
 	// set Recorder to mocked type
 	mr := events.NewMockedRecorder()
 	events.SetRecorder(mr)
+	defer events.SetRecorder(events.NewMockedRecorder())
 	resources := make(map[v1.ResourceName]resource.Quantity)
 	containers := make([]v1.Container, 0)
 	containers = append(containers, v1.Container{
@@ -411,8 +403,6 @@ func TestSetUnallocatedPodsToFailedWhenRejectApplication(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, newPod2.Status.Phase, v1.PodFailed, 3*time.Second)
 	assert.Equal(t, newPod2.Status.Reason, constants.ApplicationRejectedFailure, 3*time.Second)
-	// Test over, set Recorder back fake type
-	events.SetRecorder(k8sEvents.NewFakeRecorder(1024))
 }
 
 func TestReleaseAppAllocation(t *testing.T) {
@@ -1117,10 +1107,9 @@ func TestGetPlaceholderTasks(t *testing.T) {
 
 func TestPlaceholderTimeoutEvents(t *testing.T) {
 	context := initContextForTest()
-	recorder, ok := events.GetRecorder().(*k8sEvents.FakeRecorder)
-	if !ok {
-		t.Fatal("the EventRecorder is expected to be of type FakeRecorder")
-	}
+	recorder := k8sEvents.NewFakeRecorder(1024)
+	events.SetRecorder(recorder)
+	defer events.SetRecorder(events.NewMockedRecorder())
 
 	pod1 := v1.Pod{
 		TypeMeta: apis.TypeMeta{
@@ -1184,9 +1173,7 @@ func TestPlaceholderTimeoutEvents(t *testing.T) {
 	})
 	assert.Assert(t, task1 != nil)
 	assert.Equal(t, task1.GetTaskID(), "task02")
-
-	_, taskErr := app.GetTask("task02")
-	assert.NilError(t, taskErr, "Task should exist")
+	assert.Assert(t, app.GetTask("task02") != nil, "Task should exist")
 
 	task1.allocationKey = allocationKey
 
@@ -1222,10 +1209,9 @@ func TestApplication_onReservationStateChange(t *testing.T) {
 	dispatcher.Start()
 	defer dispatcher.Stop()
 
-	recorder, ok := events.GetRecorder().(*k8sEvents.FakeRecorder)
-	if !ok {
-		t.Fatal("the EventRecorder is expected to be of type FakeRecorder")
-	}
+	recorder := k8sEvents.NewFakeRecorder(1024)
+	events.SetRecorder(recorder)
+	defer events.SetRecorder(events.NewMockedRecorder())
 
 	app := NewApplication(appID, "root.a", "testuser", testGroups, map[string]string{}, newMockSchedulerAPI())
 	context.addApplicationToContext(app)

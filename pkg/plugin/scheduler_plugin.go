@@ -217,11 +217,11 @@ func (sp *YuniKornSchedulerPlugin) Filter(_ context.Context, _ *framework.CycleS
 	return framework.NewStatus(framework.UnschedulableAndUnresolvable, "Pod is not fit for node")
 }
 
-func (sp *YuniKornSchedulerPlugin) EventsToRegister() []framework.ClusterEventWithHint {
+func (sp *YuniKornSchedulerPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
 	return sp.context.EventsToRegister(func(_ klog.Logger, pod *v1.Pod, _, _ interface{}) (framework.QueueingHint, error) {
 		// adapt our simpler function to the QueueingHintFn contract
 		return sp.queueingHint(pod)
-	})
+	}), nil
 }
 
 // queueingHint is used to perform a lightweight check to determine if any object change may cause a pod to become
@@ -269,6 +269,7 @@ func (sp *YuniKornSchedulerPlugin) PostBind(_ context.Context, _ *framework.Cycl
 // NewSchedulerPlugin initializes a new plugin and returns it
 func NewSchedulerPlugin(_ context.Context, _ runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	log.Log(log.ShimSchedulerPlugin).Info(conf.GetBuildInfoString())
+	log.Log(log.ShimSchedulerPlugin).Warn("The plugin mode has been deprecated and will be removed in a future release. Consider migrating to YuniKorn standalone mode.")
 
 	configMaps, err := client.LoadBootstrapConfigMaps()
 	if err != nil {
@@ -293,8 +294,12 @@ func NewSchedulerPlugin(_ context.Context, _ runtime.Object, handle framework.Ha
 		log.Log(log.ShimSchedulerPlugin).Fatal("Unable to start scheduler", zap.Error(err))
 	}
 
+	context := ss.GetContext()
+	context.SetPodActivator(func(logger klog.Logger, pod *v1.Pod) {
+		handle.Activate(logger, map[string]*v1.Pod{pod.Name: pod})
+	})
 	p := &YuniKornSchedulerPlugin{
-		context: ss.GetContext(),
+		context: context,
 	}
 	events.SetRecorder(handle.EventRecorder())
 	return p, nil
@@ -302,7 +307,7 @@ func NewSchedulerPlugin(_ context.Context, _ runtime.Object, handle framework.Ha
 
 func (sp *YuniKornSchedulerPlugin) getTask(appID, taskID string) (app *cache.Application, task *cache.Task, ok bool) {
 	if app := sp.context.GetApplication(appID); app != nil {
-		if task, err := app.GetTask(taskID); err == nil {
+		if task := app.GetTask(taskID); task != nil {
 			return app, task, true
 		}
 	}

@@ -73,11 +73,11 @@ func CreatePriorityForTask(pod *v1.Pod) int32 {
 }
 
 func CreateAllocationRequestForTask(appID, taskID string, resource *si.Resource, placeholder bool, taskGroupName string, pod *v1.Pod, originator bool, preemptionPolicy *si.PreemptionPolicy) *si.AllocationRequest {
-	ask := si.AllocationAsk{
+	ask := si.Allocation{
 		AllocationKey:    taskID,
-		ResourceAsk:      resource,
+		ResourcePerAlloc: resource,
 		ApplicationID:    appID,
-		Tags:             CreateTagsForTask(pod),
+		AllocationTags:   CreateTagsForTask(pod),
 		Placeholder:      placeholder,
 		TaskGroupName:    taskGroupName,
 		Originator:       originator,
@@ -86,8 +86,8 @@ func CreateAllocationRequestForTask(appID, taskID string, resource *si.Resource,
 	}
 
 	return &si.AllocationRequest{
-		Asks: []*si.AllocationAsk{&ask},
-		RmID: conf.GetSchedulerConf().ClusterID,
+		Allocations: []*si.Allocation{&ask},
+		RmID:        conf.GetSchedulerConf().ClusterID,
 	}
 }
 
@@ -114,6 +114,32 @@ func CreateAllocationForTask(appID, taskID, nodeID string, resource *si.Resource
 	}
 }
 
+func CreateAllocationForForeignPod(pod *v1.Pod) *si.AllocationRequest {
+	podType := common.AllocTypeDefault
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind == constants.NodeKind {
+			podType = common.AllocTypeStatic
+			break
+		}
+	}
+
+	tags := CreateTagsForTask(pod)
+	tags[common.Foreign] = podType
+	tags[common.CreationTime] = strconv.FormatInt(pod.CreationTimestamp.Unix(), 10)
+	allocation := si.Allocation{
+		AllocationTags:   tags,
+		AllocationKey:    string(pod.UID),
+		ResourcePerAlloc: GetPodResource(pod),
+		Priority:         CreatePriorityForTask(pod),
+		NodeID:           pod.Spec.NodeName,
+	}
+
+	return &si.AllocationRequest{
+		Allocations: []*si.Allocation{&allocation},
+		RmID:        conf.GetSchedulerConf().ClusterID,
+	}
+}
+
 func GetTerminationTypeFromString(terminationTypeStr string) si.TerminationType {
 	if v, ok := si.TerminationType_value[terminationTypeStr]; ok {
 		return si.TerminationType(v)
@@ -121,30 +147,18 @@ func GetTerminationTypeFromString(terminationTypeStr string) si.TerminationType 
 	return si.TerminationType_STOPPED_BY_RM
 }
 
-func CreateReleaseRequestForTask(appID, taskID, allocationKey, partition, terminationType string) *si.AllocationRequest {
-	var allocToRelease []*si.AllocationRelease
-	if allocationKey != "" {
-		allocToRelease = make([]*si.AllocationRelease, 1)
-		allocToRelease[0] = &si.AllocationRelease{
-			ApplicationID:   appID,
-			AllocationKey:   allocationKey,
-			PartitionName:   partition,
-			TerminationType: GetTerminationTypeFromString(terminationType),
-			Message:         "task completed",
-		}
-	}
-
-	askToRelease := make([]*si.AllocationAskRelease, 1)
-	askToRelease[0] = &si.AllocationAskRelease{
-		ApplicationID: appID,
-		AllocationKey: taskID,
-		PartitionName: partition,
-		Message:       "task request completed",
+func CreateReleaseRequestForTask(appID, taskID, partition string, terminationType si.TerminationType) *si.AllocationRequest {
+	allocToRelease := make([]*si.AllocationRelease, 1)
+	allocToRelease[0] = &si.AllocationRelease{
+		ApplicationID:   appID,
+		AllocationKey:   taskID,
+		PartitionName:   partition,
+		TerminationType: terminationType,
+		Message:         "task completed",
 	}
 
 	releaseRequest := si.AllocationReleasesRequest{
-		AllocationsToRelease:    allocToRelease,
-		AllocationAsksToRelease: askToRelease,
+		AllocationsToRelease: allocToRelease,
 	}
 
 	return &si.AllocationRequest{
@@ -153,46 +167,31 @@ func CreateReleaseRequestForTask(appID, taskID, allocationKey, partition, termin
 	}
 }
 
-// CreateUpdateRequestForNewNode builds a NodeRequest for new node addition and restoring existing node
-func CreateUpdateRequestForNewNode(nodeID string, nodeLabels map[string]string, capacity *si.Resource, occupied *si.Resource,
-	existingAllocations []*si.Allocation) *si.NodeRequest {
-	// Use node's name as the NodeID, this is because when bind pod to node,
-	// name of node is required but uid is optional.
-	nodeInfo := &si.NodeInfo{
-		NodeID:              nodeID,
-		SchedulableResource: capacity,
-		OccupiedResource:    occupied,
-		Attributes: map[string]string{
-			constants.DefaultNodeAttributeHostNameKey: nodeID,
-			constants.DefaultNodeAttributeRackNameKey: constants.DefaultRackName,
-		},
-		ExistingAllocations: existingAllocations,
-		Action:              si.NodeInfo_CREATE,
+func CreateReleaseRequestForForeignPod(uid, partition string) *si.AllocationRequest {
+	allocToRelease := make([]*si.AllocationRelease, 1)
+	allocToRelease[0] = &si.AllocationRelease{
+		AllocationKey:   uid,
+		PartitionName:   partition,
+		TerminationType: si.TerminationType_STOPPED_BY_RM,
+		Message:         "pod terminated",
 	}
 
-	// Add nodeLabels key value to Attributes map
-	for k, v := range nodeLabels {
-		nodeInfo.Attributes[k] = v
+	releaseRequest := si.AllocationReleasesRequest{
+		AllocationsToRelease: allocToRelease,
 	}
 
-	// Add instanceType to Attributes map
-	nodeInfo.Attributes[common.InstanceType] = nodeLabels[conf.GetSchedulerConf().InstanceTypeNodeLabelKey]
-
-	nodes := make([]*si.NodeInfo, 1)
-	nodes[0] = nodeInfo
-	return &si.NodeRequest{
-		Nodes: nodes,
-		RmID:  conf.GetSchedulerConf().ClusterID,
+	return &si.AllocationRequest{
+		Releases: &releaseRequest,
+		RmID:     conf.GetSchedulerConf().ClusterID,
 	}
 }
 
-// CreateUpdateRequestForUpdatedNode builds a NodeRequest for capacity and occupied resource updates
-func CreateUpdateRequestForUpdatedNode(nodeID string, capacity *si.Resource, occupied *si.Resource) *si.NodeRequest {
+// CreateUpdateRequestForUpdatedNode builds a NodeRequest for capacity updates
+func CreateUpdateRequestForUpdatedNode(nodeID string, capacity *si.Resource) *si.NodeRequest {
 	nodeInfo := &si.NodeInfo{
 		NodeID:              nodeID,
 		Attributes:          map[string]string{},
 		SchedulableResource: capacity,
-		OccupiedResource:    occupied,
 		Action:              si.NodeInfo_UPDATE,
 	}
 

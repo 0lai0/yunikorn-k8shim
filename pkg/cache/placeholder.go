@@ -85,13 +85,14 @@ func newPlaceholder(placeholderName string, app *Application, taskGroup TaskGrou
 
 	// prepare the resource lists
 	requests := GetPlaceholderResourceRequests(taskGroup.MinResource)
+	var zeroSeconds int64 = 0
 	placeholderPod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      placeholderName,
 			Namespace: app.tags[constants.AppTagNamespace],
 			Labels: utils.MergeMaps(taskGroup.Labels, map[string]string{
-				constants.LabelApplicationID: app.GetApplicationID(),
-				constants.LabelQueueName:     app.GetQueue(),
+				constants.CanonicalLabelApplicationID: app.GetApplicationID(),
+				constants.CanonicalLabelQueueName:     app.GetQueue(),
 			}),
 			Annotations:     annotations,
 			OwnerReferences: ownerRefs,
@@ -113,13 +114,14 @@ func newPlaceholder(placeholderName string, app *Application, taskGroup TaskGrou
 					},
 				},
 			},
-			RestartPolicy:             constants.PlaceholderPodRestartPolicy,
-			SchedulerName:             constants.SchedulerName,
-			NodeSelector:              taskGroup.NodeSelector,
-			Tolerations:               taskGroup.Tolerations,
-			Affinity:                  taskGroup.Affinity,
-			TopologySpreadConstraints: taskGroup.TopologySpreadConstraints,
-			PriorityClassName:         priorityClassName,
+			RestartPolicy:                 constants.PlaceholderPodRestartPolicy,
+			SchedulerName:                 constants.SchedulerName,
+			NodeSelector:                  taskGroup.NodeSelector,
+			Tolerations:                   taskGroup.Tolerations,
+			Affinity:                      taskGroup.Affinity,
+			TopologySpreadConstraints:     taskGroup.TopologySpreadConstraints,
+			PriorityClassName:             priorityClassName,
+			TerminationGracePeriodSeconds: &zeroSeconds,
 		},
 	}
 

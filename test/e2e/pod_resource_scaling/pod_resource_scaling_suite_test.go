@@ -16,7 +16,7 @@
  limitations under the License.
 */
 
-package persistent_volume
+package pod_resource_scaling
 
 import (
 	"path/filepath"
@@ -37,26 +37,25 @@ func init() {
 	configmanager.YuniKornTestConfig.ParseFlags()
 }
 
-func TestPersistentVolume(t *testing.T) {
-	ginkgo.ReportAfterSuite("TestPersistentVolume", func(report ginkgo.Report) {
-		err := reporters.GenerateJUnitReportWithConfig(
+func TestPodResourceScaling(t *testing.T) {
+	ginkgo.ReportAfterSuite("TestPodResourceScaling", func(report ginkgo.Report) {
+		err := common.CreateJUnitReportDir()
+		Ω(err).NotTo(gomega.HaveOccurred())
+		err = reporters.GenerateJUnitReportWithConfig(
 			report,
-			filepath.Join(configmanager.YuniKornTestConfig.LogDir, "TEST-persistent_volume_junit.xml"),
+			filepath.Join(configmanager.YuniKornTestConfig.LogDir, "TEST-pod_resource_scaling_junit.xml"),
 			reporters.JunitReportConfig{OmitSpecLabels: true},
 		)
 		Ω(err).NotTo(HaveOccurred())
 	})
 	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "TestPersistentVolume", ginkgo.Label("TestPersistentVolume"))
+	ginkgo.RunSpecs(t, "Pod Resource Scaling Suite")
 }
-
-var Ω = gomega.Ω
-var HaveOccurred = gomega.HaveOccurred
-var dev string
 
 var _ = ginkgo.BeforeSuite(func() {
 	_, filename, _, _ := runtime.Caller(0)
 	suiteName = common.GetSuiteName(filename)
+
 	// Initializing kubectl client
 	kClient = k8s.KubeCtl{}
 	Ω(kClient.SetClient()).To(gomega.BeNil())
@@ -65,13 +64,16 @@ var _ = ginkgo.BeforeSuite(func() {
 	restClient = yunikorn.RClient{}
 	Ω(restClient).NotTo(gomega.BeNil())
 	yunikorn.EnsureYuniKornConfigsPresent()
+	yunikorn.UpdateConfigMapWrapper(oldConfigMap, "")
 })
 
 var _ = ginkgo.AfterSuite(func() {
-	// Clean up
-	ginkgo.By("Deleting PVCs and PVs")
-	err := kClient.DeletePVCs(dev)
-	err2 := kClient.DeletePVs(dev)
-	Ω(err).NotTo(HaveOccurred())
-	Ω(err2).NotTo(HaveOccurred())
+	yunikorn.RestoreConfigMapWrapper(oldConfigMap)
 })
+
+var Ω = gomega.Ω
+var HaveOccurred = gomega.HaveOccurred
+var Equal = gomega.Equal
+var By = ginkgo.By
+var BeforeEach = ginkgo.BeforeEach
+var AfterEach = ginkgo.AfterEach

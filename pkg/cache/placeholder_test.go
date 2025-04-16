@@ -110,6 +110,7 @@ func TestNewPlaceholder(t *testing.T) {
 		testGroups, map[string]string{constants.AppTagNamespace: namespace, constants.AppTagImagePullSecrets: "secret1,secret2"},
 		mockedSchedulerAPI)
 	app.setTaskGroups(taskGroups)
+	app.setSchedulingParamsDefinition("gangSchedulingStyle=Soft")
 	marshalledTaskGroups, err := json.Marshal(taskGroups)
 	assert.NilError(t, err, "taskGroups marshalling failed")
 	app.setTaskGroupsDefinition(string(marshalledTaskGroups))
@@ -125,17 +126,18 @@ func TestNewPlaceholder(t *testing.T) {
 	assert.Equal(t, holder.pod.Name, "ph-name")
 	assert.Equal(t, holder.pod.Namespace, namespace)
 	assert.DeepEqual(t, holder.pod.Labels, map[string]string{
-		constants.LabelApplicationID: appID,
-		constants.LabelQueueName:     queue,
-		"labelKey0":                  "labelKeyValue0",
-		"labelKey1":                  "labelKeyValue1",
+		constants.CanonicalLabelApplicationID: appID,
+		constants.CanonicalLabelQueueName:     queue,
+		"labelKey0":                           "labelKeyValue0",
+		"labelKey1":                           "labelKeyValue1",
 	})
-	assert.Equal(t, len(holder.pod.Annotations), 6, "unexpected number of annotations")
+	assert.Equal(t, len(holder.pod.Annotations), 7, "unexpected number of annotations")
 	assert.Equal(t, holder.pod.Annotations[constants.AnnotationTaskGroupName], app.taskGroups[0].Name)
 	assert.Equal(t, holder.pod.Annotations[constants.AnnotationPlaceholderFlag], constants.True)
 	assert.Equal(t, holder.pod.Annotations["annotationKey0"], "annotationValue0")
 	assert.Equal(t, holder.pod.Annotations["annotationKey1"], "annotationValue1")
 	assert.Equal(t, holder.pod.Annotations["annotationKey2"], "annotationValue2")
+	assert.Equal(t, holder.pod.Annotations[constants.AnnotationSchedulingPolicyParam], "gangSchedulingStyle=Soft")
 	var taskGroupsDef []TaskGroup
 	err = json.Unmarshal([]byte(holder.pod.Annotations[siCommon.DomainYuniKorn+"task-groups"]), &taskGroupsDef)
 	assert.NilError(t, err, "taskGroupsDef unmarshal failed")

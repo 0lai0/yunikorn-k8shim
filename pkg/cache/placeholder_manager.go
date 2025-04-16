@@ -40,7 +40,7 @@ type PlaceholderManager struct {
 	// and keep retrying deleting them in order to avoid wasting resources.
 	orphanPods  map[string]*v1.Pod
 	stopChan    chan struct{}
-	running     atomic.Value
+	running     atomic.Bool
 	cleanupTime time.Duration
 	// a simple mutex will do we do not have separate read and write paths
 	locking.RWMutex
@@ -54,11 +54,8 @@ var (
 func NewPlaceholderManager(clients *client.Clients) *PlaceholderManager {
 	mu.Lock()
 	defer mu.Unlock()
-	var r atomic.Value
-	r.Store(false)
 	placeholderMgr = &PlaceholderManager{
 		clients:     clients,
-		running:     r,
 		orphanPods:  make(map[string]*v1.Pod),
 		stopChan:    make(chan struct{}),
 		cleanupTime: 5 * time.Second,
@@ -79,7 +76,7 @@ func (mgr *PlaceholderManager) createAppPlaceholders(app *Application) error {
 	// map task group to count of already created placeholders
 	tgCounts := make(map[string]int32)
 	for _, ph := range app.getPlaceHolderTasks() {
-		tgCounts[ph.getTaskGroupName()]++
+		tgCounts[ph.GetTaskGroupName()]++
 	}
 
 	// iterate all task groups, create placeholders for all the min members
@@ -173,7 +170,7 @@ func (mgr *PlaceholderManager) Stop() {
 }
 
 func (mgr *PlaceholderManager) isRunning() bool {
-	return mgr.running.Load().(bool)
+	return mgr.running.Load()
 }
 
 func (mgr *PlaceholderManager) setRunning(flag bool) {

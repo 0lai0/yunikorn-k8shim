@@ -115,14 +115,10 @@ func (app *Application) canHandle(ev events.ApplicationEvent) bool {
 	return app.sm.Can(ev.GetEvent())
 }
 
-func (app *Application) GetTask(taskID string) (*Task, error) {
+func (app *Application) GetTask(taskID string) *Task {
 	app.lock.RLock()
 	defer app.lock.RUnlock()
-	if task, ok := app.taskMap[taskID]; ok {
-		return task, nil
-	}
-	return nil, fmt.Errorf("task %s doesn't exist in application %s",
-		taskID, app.applicationID)
+	return app.taskMap[taskID]
 }
 
 func (app *Application) GetApplicationID() string {
@@ -495,12 +491,28 @@ func (app *Application) postAppAccepted() {
 	dispatcher.Dispatch(ev)
 }
 
+// onResuming triggered when entering the resuming state which is triggered by the time out of the gang placeholders
+// if SOFT gang scheduling is configured.
+func (app *Application) onResuming() {
+	if app.originatingTask != nil {
+		events.GetRecorder().Eventf(app.originatingTask.GetTaskPod().DeepCopy(), nil, v1.EventTypeWarning, "GangScheduling",
+			"GangSchedulingFailed", "Application %s resuming as non-gang application (SOFT)", app.applicationID)
+	}
+}
+
+// onReserving triggered when entering the reserving state.
+// During normal operation this creates all the placeholders. During recovery this call could cause the application
+// in the shim and core to progress to the next state.
 func (app *Application) onReserving() {
-	// happens after recovery - if placeholders already exist, we need to send
+	// if any placeholder already exist during recovery we might need to send
 	// an event to trigger Application state change in the core
 	if len(app.getPlaceHolderTasks()) > 0 {
 		ev := NewUpdateApplicationReservationEvent(app.applicationID)
 		dispatcher.Dispatch(ev)
+	} else if app.originatingTask != nil {
+		// not recovery or no placeholders created yet add an event to the pod
+		events.GetRecorder().Eventf(app.originatingTask.GetTaskPod().DeepCopy(), nil, v1.EventTypeNormal, "GangScheduling",
+			"CreatingPlaceholders", "Application %s creating placeholders", app.applicationID)
 	}
 
 	go func() {
@@ -511,6 +523,11 @@ func (app *Application) onReserving() {
 			getPlaceholderManager().cleanUp(app)
 			ev := NewRunApplicationEvent(app.applicationID)
 			dispatcher.Dispatch(ev)
+			// failed at least one placeholder creation progress as a normal application
+			if app.originatingTask != nil {
+				events.GetRecorder().Eventf(app.originatingTask.GetTaskPod().DeepCopy(), nil, v1.EventTypeWarning, "GangScheduling",
+					"PlaceholderCreateFailed", "Application %s fall back to normal scheduling", app.applicationID)
+			}
 		}
 	}()
 }
@@ -520,7 +537,7 @@ func (app *Application) onReserving() {
 func (app *Application) onReservationStateChange() {
 	if app.originatingTask != nil {
 		events.GetRecorder().Eventf(app.originatingTask.GetTaskPod().DeepCopy(), nil, v1.EventTypeNormal, "GangScheduling",
-			"Placeholder Allocated", "Application %s placeholder has been allocated.", app.applicationID)
+			"PlaceholderAllocated", "Application %s placeholder has been allocated.", app.applicationID)
 	}
 	desireCounts := make(map[string]int32, len(app.taskGroups))
 	for _, tg := range app.taskGroups {
@@ -529,13 +546,14 @@ func (app *Application) onReservationStateChange() {
 
 	for _, t := range app.getTasks(TaskStates().Bound) {
 		if t.placeholder {
-			if _, ok := desireCounts[t.taskGroupName]; ok {
-				desireCounts[t.taskGroupName]--
+			taskGroupName := t.GetTaskGroupName()
+			if _, ok := desireCounts[taskGroupName]; ok {
+				desireCounts[taskGroupName]--
 			} else {
 				log.Log(log.ShimCacheApplication).Debug("placeholder taskGroupName set on pod is unknown for application",
 					zap.String("application", app.applicationID),
 					zap.String("podName", t.GetTaskPod().Name),
-					zap.String("taskGroupName", t.taskGroupName))
+					zap.String("taskGroupName", taskGroupName))
 			}
 		}
 	}
@@ -594,12 +612,14 @@ func (app *Application) handleFailApplicationEvent(errMsg string) {
 	unalloc = append(unalloc, app.getTasks(TaskStates().Pending)...)
 	unalloc = append(unalloc, app.getTasks(TaskStates().Scheduling)...)
 
+	timeout := strings.Contains(errMsg, constants.ApplicationInsufficientResourcesFailure)
+	rejected := strings.Contains(errMsg, constants.ApplicationRejectedFailure)
 	// publish pod level event to unallocated pods
 	for _, task := range unalloc {
 		// Only need to fail the non-placeholder pod(s)
-		if strings.Contains(errMsg, constants.ApplicationInsufficientResourcesFailure) {
+		if timeout {
 			failTaskPodWithReasonAndMsg(task, constants.ApplicationInsufficientResourcesFailure, "Scheduling has timed out due to insufficient resources")
-		} else if strings.Contains(errMsg, constants.ApplicationRejectedFailure) {
+		} else if rejected {
 			errMsgArr := strings.Split(errMsg, ":")
 			failTaskPodWithReasonAndMsg(task, constants.ApplicationRejectedFailure, errMsgArr[1])
 		}
@@ -608,42 +628,19 @@ func (app *Application) handleFailApplicationEvent(errMsg string) {
 	}
 }
 
-func (app *Application) handleReleaseAppAllocationEvent(allocationKey string, terminationType string) {
-	log.Log(log.ShimCacheApplication).Info("try to release pod from application",
-		zap.String("appID", app.applicationID),
-		zap.String("allocationKey", allocationKey),
-		zap.String("terminationType", terminationType))
-
-	for _, task := range app.taskMap {
-		if task.allocationKey == allocationKey {
-			task.setTaskTerminationType(terminationType)
-			err := task.DeleteTaskPod()
-			if err != nil {
-				log.Log(log.ShimCacheApplication).Error("failed to release allocation from application", zap.Error(err))
-			}
-			app.publishPlaceholderTimeoutEvents(task)
-		}
-	}
-}
-
-func (app *Application) handleReleaseAppAllocationAskEvent(taskID string, terminationType string) {
+func (app *Application) handleReleaseAppAllocationEvent(taskID string, terminationType string) {
 	log.Log(log.ShimCacheApplication).Info("try to release pod from application",
 		zap.String("appID", app.applicationID),
 		zap.String("taskID", taskID),
 		zap.String("terminationType", terminationType))
+
 	if task, ok := app.taskMap[taskID]; ok {
 		task.setTaskTerminationType(terminationType)
-		if task.IsPlaceholder() {
-			err := task.DeleteTaskPod()
-			if err != nil {
-				log.Log(log.ShimCacheApplication).Error("failed to release allocation ask from application", zap.Error(err))
-			}
-			app.publishPlaceholderTimeoutEvents(task)
-		} else {
-			log.Log(log.ShimCacheApplication).Warn("skip to release allocation ask, ask is not a placeholder",
-				zap.String("appID", app.applicationID),
-				zap.String("taskID", taskID))
+		err := task.DeleteTaskPod()
+		if err != nil {
+			log.Log(log.ShimCacheApplication).Error("failed to release allocation from application", zap.Error(err))
 		}
+		app.publishPlaceholderTimeoutEvents(task)
 	} else {
 		log.Log(log.ShimCacheApplication).Warn("task not found",
 			zap.String("appID", app.applicationID),
@@ -663,12 +660,13 @@ func (app *Application) handleAppTaskCompletedEvent() {
 }
 
 func (app *Application) publishPlaceholderTimeoutEvents(task *Task) {
-	if app.originatingTask != nil && task.IsPlaceholder() && task.terminationType == si.TerminationType_name[int32(si.TerminationType_TIMEOUT)] {
+	taskTerminationType := task.GetTaskTerminationType()
+	if app.originatingTask != nil && task.IsPlaceholder() && taskTerminationType == si.TerminationType_name[int32(si.TerminationType_TIMEOUT)] {
 		log.Log(log.ShimCacheApplication).Debug("trying to send placeholder timeout events to the original pod from application",
 			zap.String("appID", app.applicationID),
 			zap.Stringer("app request originating pod", app.originatingTask.GetTaskPod()),
 			zap.String("taskID", task.taskID),
-			zap.String("terminationType", task.terminationType))
+			zap.String("terminationType", taskTerminationType))
 		events.GetRecorder().Eventf(app.originatingTask.GetTaskPod().DeepCopy(), nil, v1.EventTypeWarning, "GangScheduling",
 			"PlaceholderTimeOut", "Application %s placeholder has been timed out", app.applicationID)
 	}

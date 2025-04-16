@@ -37,7 +37,6 @@ var suiteName string
 var kClient k8s.KubeCtl
 var restClient yunikorn.RClient
 var sleepRespPod *v1.Pod
-var dev = "dev" + common.RandSeq(5)
 var appsInfo *dao.ApplicationDAOInfo
 var oldConfigMap = new(v1.ConfigMap)
 
@@ -49,23 +48,21 @@ var _ = ginkgo.BeforeSuite(func() {
 	suiteName = common.GetSuiteName(filename)
 	// Initializing kubectl client
 	kClient = k8s.KubeCtl{}
-	gomega.Ω(kClient.SetClient()).To(gomega.BeNil())
+	gomega.Ω(kClient.SetClient()).To(gomega.Succeed())
 	// Initializing rest client
 	restClient = yunikorn.RClient{}
-
 	yunikorn.EnsureYuniKornConfigsPresent()
-
 	By("Port-forward the scheduler pod")
 	err := kClient.PortForwardYkSchedulerPod()
 	Ω(err).NotTo(HaveOccurred())
-
 	yunikorn.UpdateConfigMapWrapper(oldConfigMap, "fifo")
-
+})
+var _ = ginkgo.BeforeEach(func() {
+	dev = "dev" + common.RandSeq(5)
 	ginkgo.By("create development namespace")
 	ns1, err := kClient.CreateNamespace(dev, nil)
 	gomega.Ω(err).NotTo(gomega.HaveOccurred())
 	gomega.Ω(ns1.Status.Phase).To(gomega.Equal(v1.NamespaceActive))
-
 	ginkgo.By("Deploy the sleep pod to the development namespace")
 	initPod, podErr := k8s.InitSleepPod(sleepPodConfigs)
 	gomega.Ω(podErr).NotTo(gomega.HaveOccurred())
@@ -74,17 +71,17 @@ var _ = ginkgo.BeforeSuite(func() {
 	// Wait for pod to move to running state
 	err = kClient.WaitForPodRunning(dev, sleepPodConfigs.Name, 30*time.Second)
 	gomega.Ω(err).NotTo(gomega.HaveOccurred())
-
 	appsInfo, err = restClient.GetAppInfo("default", "root."+dev, sleepRespPod.ObjectMeta.Labels["applicationId"])
 	gomega.Ω(err).NotTo(gomega.HaveOccurred())
 	gomega.Ω(appsInfo).NotTo(gomega.BeNil())
 })
-
-var _ = ginkgo.AfterSuite(func() {
+var _ = ginkgo.AfterEach(func() {
 	ginkgo.By("Tear down namespace: " + dev)
 	err := kClient.TearDownNamespace(dev)
 	Ω(err).NotTo(HaveOccurred())
+})
 
+var _ = ginkgo.AfterSuite(func() {
 	yunikorn.RestoreConfigMapWrapper(oldConfigMap)
 })
 
@@ -104,8 +101,7 @@ var _ = ginkgo.Describe("", func() {
 
 	ginkgo.It("Verify_Pod_Alloc_Props", func() {
 		ginkgo.By("Verify the pod allocation properties")
-		gomega.Ω(appsInfo.Allocations).NotTo(gomega.BeNil())
-		gomega.Ω(len(appsInfo.Allocations)).NotTo(gomega.BeZero())
+		gomega.Ω(appsInfo.Allocations).NotTo(gomega.BeEmpty())
 		allocation := appsInfo.Allocations[0]
 		gomega.Ω(allocation).NotTo(gomega.BeNil())
 		gomega.Ω(allocation.AllocationKey).NotTo(gomega.BeNil())
@@ -113,6 +109,78 @@ var _ = ginkgo.Describe("", func() {
 		gomega.Ω(allocation.ApplicationID).To(gomega.Equal(sleepRespPod.ObjectMeta.Labels["applicationId"]))
 		core := sleepRespPod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
 		mem := sleepRespPod.Spec.Containers[0].Resources.Requests.Memory().Value()
+		resMap := allocation.ResourcePerAlloc
+		Ω(len(resMap)).NotTo(gomega.BeZero())
+		Ω(resMap["memory"]).To(gomega.Equal(mem))
+		Ω(resMap["vcore"]).To(gomega.Equal(core))
+	})
+
+	ginkgo.It("Verify_BestEffort_QOS_Pod_Scheduling", func() {
+		ginkgo.By("Create a pod with QOS class set to BestEffort")
+		bestEffortPodConfig := k8s.SleepPodConfig{Name: "besteffortpod", NS: dev, QOSClass: v1.PodQOSBestEffort}
+		initPod, podErr := k8s.InitSleepPod(bestEffortPodConfig)
+		gomega.Ω(podErr).NotTo(gomega.HaveOccurred())
+		bestEffortPod, err := kClient.CreatePod(initPod, dev)
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Wait for the pod to move to running state")
+		err = kClient.WaitForPodRunning(dev, bestEffortPodConfig.Name, 30*time.Second)
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Verify that the pod is scheduled and running")
+		appsInfo, err = restClient.GetAppInfo("default", "root."+dev, bestEffortPod.ObjectMeta.Labels["applicationId"])
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+		gomega.Ω(appsInfo).NotTo(gomega.BeNil())
+		gomega.Ω(appsInfo.State).To(gomega.Equal("Running"))
+
+		ginkgo.By("Verify that the pod's QOS class is BestEffort")
+		gomega.Ω(bestEffortPod.Status.QOSClass).To(gomega.Equal(v1.PodQOSBestEffort))
+
+		ginkgo.By("Verify that the pod's scheduler name is yunikorn")
+		gomega.Ω("yunikorn").To(gomega.Equal(bestEffortPod.Spec.SchedulerName))
+		allocation := appsInfo.Allocations[0]
+		gomega.Ω(allocation).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.AllocationKey).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.NodeID).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.ApplicationID).To(gomega.Equal(bestEffortPod.ObjectMeta.Labels["applicationId"]))
+		core := bestEffortPod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+		mem := bestEffortPod.Spec.Containers[0].Resources.Requests.Memory().Value()
+		resMap := allocation.ResourcePerAlloc
+		Ω(len(resMap)).NotTo(gomega.BeZero())
+		Ω(resMap["memory"]).To(gomega.Equal(mem))
+		Ω(resMap["vcore"]).To(gomega.Equal(core))
+	})
+
+	ginkgo.It("Verify_NonBestEffort_QOS_Pod_Scheduling", func() {
+		ginkgo.By("Create a pod with QOS class set to Burstable")
+		burstablePodConfig := k8s.SleepPodConfig{Name: "burstablepod", NS: dev, QOSClass: v1.PodQOSBurstable}
+		initPod, podErr := k8s.InitSleepPod(burstablePodConfig)
+		gomega.Ω(podErr).NotTo(gomega.HaveOccurred())
+		burstablePod, err := kClient.CreatePod(initPod, dev)
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Wait for the pod to move to running state")
+		err = kClient.WaitForPodRunning(dev, burstablePodConfig.Name, 30*time.Second)
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Verify that the pod is scheduled and running")
+		appsInfo, err = restClient.GetAppInfo("default", "root."+dev, burstablePod.ObjectMeta.Labels["applicationId"])
+		gomega.Ω(err).NotTo(gomega.HaveOccurred())
+		gomega.Ω(appsInfo).NotTo(gomega.BeNil())
+		gomega.Ω(appsInfo.State).To(gomega.Equal("Running"))
+
+		ginkgo.By("Verify that the pod's QOS class is not BestEffort")
+		gomega.Ω(burstablePod.Status.QOSClass).NotTo(gomega.Equal(v1.PodQOSBestEffort))
+
+		ginkgo.By("Verify that the pod's scheduler name is yunikorn")
+		gomega.Ω("yunikorn").To(gomega.Equal(burstablePod.Spec.SchedulerName))
+		allocation := appsInfo.Allocations[0]
+		gomega.Ω(allocation).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.AllocationKey).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.NodeID).NotTo(gomega.BeNil())
+		gomega.Ω(allocation.ApplicationID).To(gomega.Equal(burstablePod.ObjectMeta.Labels["applicationId"]))
+		core := burstablePod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+		mem := burstablePod.Spec.Containers[0].Resources.Requests.Memory().Value()
 		resMap := allocation.ResourcePerAlloc
 		Ω(len(resMap)).NotTo(gomega.BeZero())
 		Ω(resMap["memory"]).To(gomega.Equal(mem))

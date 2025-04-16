@@ -85,7 +85,6 @@ func TestUpdateAllocation_NewTask_TaskNotFound(t *testing.T) {
 }
 
 func TestUpdateAllocation_NewTask_AssumePodFails(t *testing.T) {
-	t.Skip("disabled until YUNIKORN-2629 is resolved") // test can randomly trigger a deadlock, resulting in a failed build
 	callback, context := initCallbackTest(t, false, false)
 	defer dispatcher.UnregisterAllEventHandlers()
 	defer dispatcher.Stop()
@@ -132,27 +131,6 @@ func TestUpdateAllocation_NewTask_PodAlreadyAssigned(t *testing.T) {
 	assert.Equal(t, TaskStates().Bound, task.GetTaskState())
 	assert.Equal(t, fakeNodeName, task.nodeName)
 	assert.Equal(t, TaskSchedAllocated, task.schedulingState)
-}
-
-func TestUpdateAllocation_AskRejected(t *testing.T) {
-	callback, context := initCallbackTest(t, false, false)
-	defer dispatcher.UnregisterAllEventHandlers()
-	defer dispatcher.Stop()
-
-	err := callback.UpdateAllocation(&si.AllocationResponse{
-		Rejected: []*si.RejectedAllocationAsk{
-			{
-				ApplicationID: appID,
-				AllocationKey: taskUID1,
-			},
-		},
-	})
-	assert.NilError(t, err, "error updating allocation")
-	task := context.getTask(appID, taskUID1)
-	err = utils.WaitForCondition(func() bool {
-		return task.GetTaskState() == TaskStates().Failed
-	}, 10*time.Millisecond, time.Second)
-	assert.NilError(t, err, "task has not transitioned to Failed state")
 }
 
 func TestUpdateAllocation_AllocationRejected(t *testing.T) {
@@ -240,33 +218,6 @@ func TestUpdateAllocation_AllocationReleased_StoppedByRM(t *testing.T) {
 	assert.Error(t, err, "timeout waiting for condition") // pod is not expected to be deleted
 }
 
-func TestUpdateAllocation_AskReleased(t *testing.T) {
-	callback, context := initCallbackTest(t, false, true)
-	defer dispatcher.UnregisterAllEventHandlers()
-	defer dispatcher.Stop()
-	app := context.getApplication(appID)
-	app.sm.SetState(ApplicationStates().Running)
-	var deleteCalled atomic.Bool
-	context.apiProvider.(*client.MockedAPIProvider).MockDeleteFn(func(pod *v1.Pod) error { //nolint:errcheck
-		deleteCalled.Store(true)
-		return nil
-	})
-
-	err := callback.UpdateAllocation(&si.AllocationResponse{
-		ReleasedAsks: []*si.AllocationAskRelease{
-			{
-				ApplicationID:   appID,
-				AllocationKey:   taskUID1,
-				TerminationType: si.TerminationType_TIMEOUT,
-			},
-		},
-	})
-	assert.NilError(t, err, "error updating allocation")
-	assert.Assert(t, !context.schedulerCache.IsAssumedPod(taskUID1))
-	err = utils.WaitForCondition(deleteCalled.Load, 10*time.Millisecond, time.Second)
-	assert.NilError(t, err, "pod has not been deleted")
-}
-
 func TestUpdateApplication_Accepted(t *testing.T) {
 	callback, context := initCallbackTest(t, false, false)
 	defer dispatcher.UnregisterAllEventHandlers()
@@ -297,6 +248,7 @@ func TestUpdateApplication_Rejected(t *testing.T) {
 	NewPlaceholderManager(context.apiProvider.GetAPIs())
 	recorder := k8sEvents.NewFakeRecorder(1024)
 	events.SetRecorder(recorder)
+	defer events.SetRecorder(events.NewMockedRecorder())
 
 	err := callback.UpdateApplication(&si.ApplicationResponse{
 		Rejected: []*si.RejectedApplication{
@@ -410,6 +362,7 @@ func testUpdateApplicationFailure(t *testing.T, state string) {
 	NewPlaceholderManager(context.apiProvider.GetAPIs())
 	recorder := k8sEvents.NewFakeRecorder(1024)
 	events.SetRecorder(recorder)
+	defer events.SetRecorder(events.NewMockedRecorder())
 
 	err := callback.UpdateApplication(&si.ApplicationResponse{
 		Updated: []*si.UpdatedApplication{
@@ -508,6 +461,7 @@ func TestSendEvent(t *testing.T) {
 	callback, _ := initCallbackTest(t, false, false)
 	recorder := k8sEvents.NewFakeRecorder(1024)
 	events.SetRecorder(recorder)
+	defer events.SetRecorder(events.NewMockedRecorder())
 	defer dispatcher.UnregisterAllEventHandlers()
 	defer dispatcher.Stop()
 

@@ -24,9 +24,13 @@ import (
 	"io"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/apache/yunikorn-core/pkg/common/configs"
+	"github.com/apache/yunikorn-k8shim/pkg/common/constants"
 	tests "github.com/apache/yunikorn-k8shim/test/e2e"
 	"github.com/apache/yunikorn-k8shim/test/e2e/framework/configmanager"
 	"github.com/apache/yunikorn-k8shim/test/e2e/framework/helpers/k8s"
@@ -98,6 +102,170 @@ var _ = Describe("ConfigMap", func() {
 		Ω(err).NotTo(HaveOccurred())
 
 		checkSchedulerConfig(schedulerConfig)
+	})
+
+	It("Configure the scheduler with an valid queue name", func() {
+		validConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: tag
+        value: namespace
+        create: true
+    queues:
+      - name: root_Test-a_b_#_c_#_d_/_e@dom:ain
+        submitacl: '*'
+`
+		data := map[string]string{"queues.yaml": validConfig}
+		validConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: data,
+		}
+		cm, err := kClient.UpdateConfigMap(validConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Ω(cm).ShouldNot(gomega.BeNil())
+	})
+
+	It("Configure the scheduler with an invalid queue name", func() {
+		invalidConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: tag
+        value: namespace
+        create: true
+    queues:
+      - name: ro!ot
+        submitacl: '*'
+`
+		invalidConfigData := map[string]string{"queues.yaml": invalidConfig}
+		invalidConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: invalidConfigData,
+		}
+		_, invalidConfigErr := kClient.UpdateConfigMap(invalidConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(invalidConfigErr).Should(gomega.HaveOccurred())
+	})
+
+	It("Configure the scheduler with an valid user name in placement rule filter", func() {
+		validConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: fixed
+        value: root_Test-a_b_#_c_#_d_/_e@dom:ain
+        create: true
+        filter:
+          type: allow
+          users:
+            - user_Test-a_b_#_c_#_d_/_e@dom:ain.com
+    queues:
+      - name: root
+        submitacl: '*'
+`
+		data := map[string]string{"queues.yaml": validConfig}
+		validConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: data,
+		}
+		cm, err := kClient.UpdateConfigMap(validConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Ω(cm).ShouldNot(gomega.BeNil())
+	})
+
+	It("Configure the scheduler with an invalid user name in placement rule filter", func() {
+		invalidConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: fixed
+        value: root_Test-a_b_#_c_#_d_/_e@dom:ain
+        create: true
+        filter:
+          type: allow
+          users:
+            - user_inva!lid
+    queues:
+      - name: root
+        submitacl: '*'
+`
+		invalidConfigData := map[string]string{"queues.yaml": invalidConfig}
+		invalidConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: invalidConfigData,
+		}
+		_, invalidConfigErr := kClient.UpdateConfigMap(invalidConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(invalidConfigErr).Should(gomega.HaveOccurred())
+	})
+
+	ginkgo.It("Configure the scheduler with a valid group name in placement rule filter", func() {
+		validConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: fixed
+        value: root_Test-a_b_#_c_#_d_/_e@dom:ain
+        create: true
+        filter:
+          type: allow
+          groups:
+            - group1
+            - group_Test-a_b_#_c_#_d_/_e@dom:ain.com
+    queues:
+      - name: root
+        submitacl: '*'
+`
+		data := map[string]string{"queues.yaml": validConfig}
+		validConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: data,
+		}
+		cm, err := kClient.UpdateConfigMap(validConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Ω(cm).ShouldNot(gomega.BeNil())
+	})
+
+	ginkgo.It("Configure the scheduler with an invalid group name in placement rule filter", func() {
+		invalidConfig := `
+partitions:
+  - name: default
+    placementrules:
+      - name: fixed
+        value: root_Test-a_b_#_c_#_d_/_e@dom:ain
+        create: true
+        filter:
+          type: allow
+          groups:
+            - group_inva!lid
+    queues:
+      - name: root
+        submitacl: '*'
+`
+		data := map[string]string{"queues.yaml": invalidConfig}
+		invalidConfigMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.ConfigMapName,
+				Namespace: configmanager.YuniKornTestConfig.YkNamespace,
+			},
+			Data: data,
+		}
+		_, err := kClient.UpdateConfigMap(invalidConfigMap, configmanager.YuniKornTestConfig.YkNamespace)
+		gomega.Ω(err).Should(gomega.HaveOccurred())
 	})
 
 	AfterEach(func() {

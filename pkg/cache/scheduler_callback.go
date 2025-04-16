@@ -64,7 +64,7 @@ func (callback *AsyncRMCallback) UpdateAllocation(response *si.AllocationRespons
 		task.setAllocationKey(alloc.AllocationKey)
 
 		if err := callback.context.AssumePod(alloc.AllocationKey, alloc.NodeID); err != nil {
-			task.failWithEvent(err.Error(), "AssumePodError")
+			task.FailWithEvent(err.Error(), "AssumePodError")
 			return err
 		}
 
@@ -75,15 +75,6 @@ func (callback *AsyncRMCallback) UpdateAllocation(response *si.AllocationRespons
 			ev := NewAllocateTaskEvent(alloc.ApplicationID, task.taskID, alloc.AllocationKey, alloc.NodeID)
 			dispatcher.Dispatch(ev)
 		}
-	}
-
-	for _, reject := range response.Rejected {
-		// request rejected by the scheduler, put it back and try scheduling again
-		log.Log(log.ShimRMCallback).Debug("callback: response to rejected ask",
-			zap.String("allocationKey", reject.AllocationKey))
-		dispatcher.Dispatch(NewRejectTaskEvent(reject.ApplicationID, reject.AllocationKey,
-			fmt.Sprintf("task %s ask from application %s is rejected by scheduler",
-				reject.AllocationKey, reject.ApplicationID)))
 	}
 
 	for _, reject := range response.RejectedAllocations {
@@ -106,16 +97,6 @@ func (callback *AsyncRMCallback) UpdateAllocation(response *si.AllocationRespons
 		if release.TerminationType != si.TerminationType_STOPPED_BY_RM {
 			// send release app allocation to application states machine
 			ev := NewReleaseAppAllocationEvent(release.ApplicationID, release.TerminationType, release.AllocationKey)
-			dispatcher.Dispatch(ev)
-		}
-	}
-
-	for _, ask := range response.ReleasedAsks {
-		log.Log(log.ShimRMCallback).Debug("callback: response to released allocations",
-			zap.String("allocation key", ask.AllocationKey))
-
-		if ask.TerminationType == si.TerminationType_TIMEOUT {
-			ev := NewReleaseAppAllocationAskEvent(ask.ApplicationID, ask.TerminationType, ask.AllocationKey)
 			dispatcher.Dispatch(ev)
 		}
 	}
@@ -158,18 +139,16 @@ func (callback *AsyncRMCallback) UpdateApplication(response *si.ApplicationRespo
 			zap.String("new status", updated.State))
 		switch updated.State {
 		case ApplicationStates().Completed:
-			callback.context.RemoveApplicationInternal(updated.ApplicationID)
+			callback.context.RemoveApplication(updated.ApplicationID)
 		case ApplicationStates().Resuming:
 			app := callback.context.GetApplication(updated.ApplicationID)
 			if app != nil && app.GetApplicationState() == ApplicationStates().Reserving {
 				ev := NewResumingApplicationEvent(updated.ApplicationID)
 				dispatcher.Dispatch(ev)
 			}
-		default:
-			if updated.State == ApplicationStates().Failing || updated.State == ApplicationStates().Failed {
-				ev := NewFailApplicationEvent(updated.ApplicationID, updated.Message)
-				dispatcher.Dispatch(ev)
-			}
+		case ApplicationStates().Failing, ApplicationStates().Failed:
+			ev := NewFailApplicationEvent(updated.ApplicationID, updated.Message)
+			dispatcher.Dispatch(ev)
 		}
 	}
 	return nil
@@ -212,7 +191,7 @@ func (callback *AsyncRMCallback) PreemptionPredicates(args *si.PreemptionPredica
 	}
 	return &si.PreemptionPredicatesResponse{
 		Success: ok,
-		Index:   int32(index),
+		Index:   int32(index), //nolint:gosec
 	}
 }
 

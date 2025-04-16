@@ -81,10 +81,8 @@ func TestUpdateLabels(t *testing.T) {
 	assert.Equal(t, patch[0].Op, "add")
 	assert.Equal(t, patch[0].Path, "/metadata/labels")
 	if updatedMap, ok := patch[0].Value.(map[string]string); ok {
-		assert.Equal(t, len(updatedMap), 5)
+		assert.Equal(t, len(updatedMap), 3)
 		assert.Equal(t, updatedMap["random"], "random")
-		assert.Equal(t, updatedMap[constants.CanonicalLabelQueueName], "root.default")
-		assert.Equal(t, updatedMap[constants.LabelQueueName], "root.default")
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.CanonicalLabelApplicationID], constants.AutoGenAppPrefix), true)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.LabelApplicationID], constants.AutoGenAppPrefix), true)
 	} else {
@@ -119,10 +117,8 @@ func TestUpdateLabels(t *testing.T) {
 	assert.Equal(t, patch[0].Op, "add")
 	assert.Equal(t, patch[0].Path, "/metadata/labels")
 	if updatedMap, ok := patch[0].Value.(map[string]string); ok {
-		assert.Equal(t, len(updatedMap), 5)
+		assert.Equal(t, len(updatedMap), 3)
 		assert.Equal(t, updatedMap["random"], "random")
-		assert.Equal(t, updatedMap[constants.CanonicalLabelQueueName], "root.default")
-		assert.Equal(t, updatedMap[constants.LabelQueueName], "root.default")
 		assert.Equal(t, updatedMap[constants.CanonicalLabelApplicationID], "app-0001")
 		assert.Equal(t, updatedMap[constants.LabelApplicationID], "app-0001")
 	} else {
@@ -192,9 +188,7 @@ func TestUpdateLabels(t *testing.T) {
 	assert.Equal(t, patch[0].Op, "add")
 	assert.Equal(t, patch[0].Path, "/metadata/labels")
 	if updatedMap, ok := patch[0].Value.(map[string]string); ok {
-		assert.Equal(t, len(updatedMap), 4)
-		assert.Equal(t, updatedMap[constants.CanonicalLabelQueueName], "root.default")
-		assert.Equal(t, updatedMap[constants.LabelQueueName], "root.default")
+		assert.Equal(t, len(updatedMap), 2)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.CanonicalLabelApplicationID], constants.AutoGenAppPrefix), true)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.LabelApplicationID], constants.AutoGenAppPrefix), true)
 	} else {
@@ -222,9 +216,7 @@ func TestUpdateLabels(t *testing.T) {
 	assert.Equal(t, patch[0].Op, "add")
 	assert.Equal(t, patch[0].Path, "/metadata/labels")
 	if updatedMap, ok := patch[0].Value.(map[string]string); ok {
-		assert.Equal(t, len(updatedMap), 4)
-		assert.Equal(t, updatedMap[constants.CanonicalLabelQueueName], "root.default")
-		assert.Equal(t, updatedMap[constants.LabelQueueName], "root.default")
+		assert.Equal(t, len(updatedMap), 2)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.CanonicalLabelApplicationID], constants.AutoGenAppPrefix), true)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.LabelApplicationID], constants.AutoGenAppPrefix), true)
 	} else {
@@ -250,9 +242,7 @@ func TestUpdateLabels(t *testing.T) {
 	assert.Equal(t, patch[0].Op, "add")
 	assert.Equal(t, patch[0].Path, "/metadata/labels")
 	if updatedMap, ok := patch[0].Value.(map[string]string); ok {
-		assert.Equal(t, len(updatedMap), 4)
-		assert.Equal(t, updatedMap[constants.CanonicalLabelQueueName], "root.default")
-		assert.Equal(t, updatedMap[constants.LabelQueueName], "root.default")
+		assert.Equal(t, len(updatedMap), 2)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.CanonicalLabelApplicationID], constants.AutoGenAppPrefix), true)
 		assert.Equal(t, strings.HasPrefix(updatedMap[constants.LabelApplicationID], constants.AutoGenAppPrefix), true)
 	} else {
@@ -462,7 +452,7 @@ func TestMutate(t *testing.T) {
 	assert.Check(t, resp.Allowed, "response not allowed for pod")
 	assert.Equal(t, schedulerName(t, resp.Patch), "yunikorn", "yunikorn not set as scheduler for pod")
 	assert.Equal(t, labels(t, resp.Patch)[constants.LabelApplicationID], "yunikorn-default-autogen", "wrong applicationId label")
-	assert.Equal(t, labels(t, resp.Patch)[constants.LabelQueueName], "root.default", "incorrect queue name")
+	assert.Equal(t, labels(t, resp.Patch)[constants.LabelQueueName], nil, "incorrect queue name")
 
 	// pod without applicationID
 	pod = v1.Pod{ObjectMeta: metav1.ObjectMeta{
@@ -578,7 +568,9 @@ func TestMutate(t *testing.T) {
 	assert.Check(t, resp.Allowed, "response not allowed for unknown object type")
 	assert.Check(t, len(resp.Patch) > 0, "empty patch for deployment")
 	annotations := annotationsFromDeployment(t, resp.Patch)
-	assert.Equal(t, annotations[common.UserInfoAnnotation].(string), "{\"user\":\"testExtUser\"}")
+	annotationValue, ok := annotations[common.UserInfoAnnotation].(string)
+	assert.Assert(t, ok, "UserInfoAnnotation value is not a string")
+	assert.Equal(t, annotationValue, "{\"user\":\"testExtUser\"}")
 
 	// deployment - annotation is not set, bypassAuth is enabled
 	ac = prepareController(t, "", "", "^kube-system$,^bypass$", "", "^nolabel$", true, true)
@@ -848,7 +840,9 @@ func schedulerName(t *testing.T, patch []byte) string {
 	ops := parsePatch(t, patch)
 	for _, op := range ops {
 		if op.Path == "/spec/schedulerName" {
-			return op.Value.(string)
+			val, ok := op.Value.(string)
+			assert.Assert(t, ok, "scheduler name value is not a string")
+			return val
 		}
 	}
 	return ""
@@ -858,7 +852,9 @@ func labels(t *testing.T, patch []byte) map[string]interface{} {
 	ops := parsePatch(t, patch)
 	for _, op := range ops {
 		if op.Path == "/metadata/labels" {
-			return op.Value.(map[string]interface{})
+			val, ok := op.Value.(map[string]interface{})
+			assert.Assert(t, ok, "labels value is not a map")
+			return val
 		}
 	}
 	return make(map[string]interface{})
@@ -868,7 +864,9 @@ func annotationsFromDeployment(t *testing.T, patch []byte) map[string]interface{
 	ops := parsePatch(t, patch)
 	for _, op := range ops {
 		if op.Path == "/spec/template/metadata/annotations" {
-			return op.Value.(map[string]interface{})
+			val, ok := op.Value.(map[string]interface{})
+			assert.Assert(t, ok, "annotations value is not a map")
+			return val
 		}
 	}
 	return make(map[string]interface{})

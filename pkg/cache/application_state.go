@@ -49,13 +49,12 @@ const (
 	KillApplication
 	KilledApplication
 	ReleaseAppAllocation
-	ReleaseAppAllocationAsk
 	ResumingApplication
 	AppTaskCompleted
 )
 
 func (ae ApplicationEventType) String() string {
-	return [...]string{"SubmitApplication", "AcceptApplication", "TryReserve", "UpdateReservation", "RunApplication", "RejectApplication", "CompleteApplication", "FailApplication", "KillApplication", "KilledApplication", "ReleaseAppAllocation", "ReleaseAppAllocationAsk", "ResumingApplication", "AppTaskCompleted"}[ae]
+	return [...]string{"SubmitApplication", "AcceptApplication", "TryReserve", "UpdateReservation", "RunApplication", "RejectApplication", "CompleteApplication", "FailApplication", "KillApplication", "KilledApplication", "ReleaseAppAllocation", "ResumingApplication", "AppTaskCompleted"}[ae]
 }
 
 // ------------------------
@@ -295,37 +294,6 @@ func (re ReleaseAppAllocationEvent) GetEvent() string {
 	return re.event.String()
 }
 
-type ReleaseAppAllocationAskEvent struct {
-	applicationID   string
-	taskID          string
-	terminationType string
-	event           ApplicationEventType
-}
-
-func NewReleaseAppAllocationAskEvent(appID string, allocTermination si.TerminationType, taskID string) ReleaseAppAllocationAskEvent {
-	return ReleaseAppAllocationAskEvent{
-		applicationID:   appID,
-		taskID:          taskID,
-		terminationType: si.TerminationType_name[int32(allocTermination)],
-		event:           ReleaseAppAllocationAsk,
-	}
-}
-
-func (re ReleaseAppAllocationAskEvent) GetApplicationID() string {
-	return re.applicationID
-}
-
-func (re ReleaseAppAllocationAskEvent) GetArgs() []interface{} {
-	args := make([]interface{}, 2)
-	args[0] = re.taskID
-	args[1] = re.terminationType
-	return args
-}
-
-func (re ReleaseAppAllocationAskEvent) GetEvent() string {
-	return re.event.String()
-}
-
 // ------------------------
 // Resuming application
 // ------------------------
@@ -434,31 +402,16 @@ func newAppState() *fsm.FSM { //nolint:funlen
 			},
 			{
 				Name: ReleaseAppAllocation.String(),
-				Src:  []string{states.Running},
-				Dst:  states.Running,
-			},
-			{
-				Name: ReleaseAppAllocation.String(),
-				Src:  []string{states.Failing},
-				Dst:  states.Failing,
-			},
-			{
-				Name: ReleaseAppAllocation.String(),
-				Src:  []string{states.Resuming},
-				Dst:  states.Resuming,
-			},
-			{
-				Name: ReleaseAppAllocationAsk.String(),
 				Src:  []string{states.Running, states.Accepted, states.Reserving},
 				Dst:  states.Running,
 			},
 			{
-				Name: ReleaseAppAllocationAsk.String(),
+				Name: ReleaseAppAllocation.String(),
 				Src:  []string{states.Failing},
 				Dst:  states.Failing,
 			},
 			{
-				Name: ReleaseAppAllocationAsk.String(),
+				Name: ReleaseAppAllocation.String(),
 				Src:  []string{states.Resuming},
 				Dst:  states.Resuming,
 			},
@@ -506,6 +459,10 @@ func newAppState() *fsm.FSM { //nolint:funlen
 				app := event.Args[0].(*Application) //nolint:errcheck
 				app.onReserving()
 			},
+			states.Resuming: func(_ context.Context, event *fsm.Event) {
+				app := event.Args[0].(*Application) //nolint:errcheck
+				app.onResuming()
+			},
 			SubmitApplication.String(): func(_ context.Context, event *fsm.Event) {
 				app := event.Args[0].(*Application) //nolint:errcheck
 				event.Err = app.handleSubmitApplicationEvent()
@@ -513,7 +470,8 @@ func newAppState() *fsm.FSM { //nolint:funlen
 			RejectApplication.String(): func(_ context.Context, event *fsm.Event) {
 				app := event.Args[0].(*Application) //nolint:errcheck
 				eventArgs := make([]string, 1)
-				if err := events.GetEventArgsAsStrings(eventArgs, event.Args[1].([]interface{})); err != nil {
+				generic := event.Args[1].([]interface{}) //nolint:errcheck
+				if err := events.GetEventArgsAsStrings(eventArgs, generic); err != nil {
 					log.Log(log.ShimFSM).Error("fail to parse event arg", zap.Error(err))
 					return
 				}
@@ -527,7 +485,8 @@ func newAppState() *fsm.FSM { //nolint:funlen
 			FailApplication.String(): func(_ context.Context, event *fsm.Event) {
 				app := event.Args[0].(*Application) //nolint:errcheck
 				eventArgs := make([]string, 1)
-				if err := events.GetEventArgsAsStrings(eventArgs, event.Args[1].([]interface{})); err != nil {
+				generic := event.Args[1].([]interface{}) //nolint:errcheck
+				if err := events.GetEventArgsAsStrings(eventArgs, generic); err != nil {
 					log.Log(log.ShimFSM).Error("fail to parse event arg", zap.Error(err))
 					return
 				}
@@ -541,24 +500,14 @@ func newAppState() *fsm.FSM { //nolint:funlen
 			ReleaseAppAllocation.String(): func(_ context.Context, event *fsm.Event) {
 				app := event.Args[0].(*Application) //nolint:errcheck
 				eventArgs := make([]string, 2)
-				if err := events.GetEventArgsAsStrings(eventArgs, event.Args[1].([]interface{})); err != nil {
-					log.Log(log.ShimFSM).Error("fail to parse event arg", zap.Error(err))
-					return
-				}
-				allocationKey := eventArgs[0]
-				terminationType := eventArgs[1]
-				app.handleReleaseAppAllocationEvent(allocationKey, terminationType)
-			},
-			ReleaseAppAllocationAsk.String(): func(_ context.Context, event *fsm.Event) {
-				app := event.Args[0].(*Application) //nolint:errcheck
-				eventArgs := make([]string, 2)
-				if err := events.GetEventArgsAsStrings(eventArgs, event.Args[1].([]interface{})); err != nil {
+				generic := event.Args[1].([]interface{}) //nolint:errcheck
+				if err := events.GetEventArgsAsStrings(eventArgs, generic); err != nil {
 					log.Log(log.ShimFSM).Error("fail to parse event arg", zap.Error(err))
 					return
 				}
 				taskID := eventArgs[0]
 				terminationType := eventArgs[1]
-				app.handleReleaseAppAllocationAskEvent(taskID, terminationType)
+				app.handleReleaseAppAllocationEvent(taskID, terminationType)
 			},
 			AppTaskCompleted.String(): func(_ context.Context, event *fsm.Event) {
 				app := event.Args[0].(*Application) //nolint:errcheck

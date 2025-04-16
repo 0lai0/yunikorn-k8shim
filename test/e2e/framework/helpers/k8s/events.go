@@ -66,8 +66,8 @@ func ObserveEventAfterAction(c clientset.Interface, ns string, eventPredicate fu
 	var informerStartedGuard sync.Once
 
 	// Create an informer to list/watch events from the test framework namespace.
-	_, controller := cache.NewInformer(
-		&cache.ListWatch{
+	_, controller := cache.NewInformerWithOptions(cache.InformerOptions{
+		ListerWatcher: &cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				ls, err := c.CoreV1().Events(ns).List(context.TODO(), options)
 				return ls, err
@@ -79,9 +79,8 @@ func ObserveEventAfterAction(c clientset.Interface, ns string, eventPredicate fu
 				return w, err
 			},
 		},
-		&v1.Event{},
-		0,
-		cache.ResourceEventHandlerFuncs{
+		ObjectType: &v1.Event{},
+		Handler: cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				e, ok := obj.(*v1.Event)
 				ginkgo.By(fmt.Sprintf("Considering event: \nType = [%s], Name = [%s], Reason = [%s], Message = [%s]", e.Type, e.Name, e.Reason, e.Message))
@@ -91,7 +90,8 @@ func ObserveEventAfterAction(c clientset.Interface, ns string, eventPredicate fu
 				}
 			},
 		},
-	)
+		ResyncPeriod: 0,
+	})
 
 	// Start the informer and block this goroutine waiting for the started signal.
 	informerStopChan := make(chan struct{})
@@ -142,7 +142,7 @@ func (e *EventHandler) WaitForUpdate(timeout time.Duration) bool {
 
 func ObserveConfigMapInformerUpdateAfterAction(action func()) {
 	kubeClient := KubeCtl{}
-	gomega.Expect(kubeClient.SetClient()).To(gomega.BeNil())
+	gomega.Expect(kubeClient.SetClient()).To(gomega.Succeed())
 
 	// Setup ConfigMap informer
 	stopChan := make(chan struct{})
@@ -156,5 +156,5 @@ func ObserveConfigMapInformerUpdateAfterAction(action func()) {
 
 	// Wait for ConfigMap informer recevie update event.
 	updateOk := eventHandler.WaitForUpdate(30 * time.Second)
-	gomega.Ω(updateOk).To(gomega.Equal(true))
+	gomega.Ω(updateOk).To(gomega.BeTrue())
 }

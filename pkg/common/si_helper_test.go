@@ -19,12 +19,13 @@ package common
 
 import (
 	"testing"
+	"time"
 
 	"gotest.tools/v3/assert"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	apis "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/apache/yunikorn-k8shim/pkg/common/constants"
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/common"
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
@@ -33,29 +34,23 @@ const nodeID = "node-01"
 
 func TestCreateReleaseRequestForTask(t *testing.T) {
 	// with allocationKey
-	request := CreateReleaseRequestForTask("app01", "task01", "task01", "default", "STOPPED_BY_RM")
+	request := CreateReleaseRequestForTask("app01", "task01", "default", si.TerminationType_STOPPED_BY_RM)
 	assert.Assert(t, request.Releases != nil)
 	assert.Assert(t, request.Releases.AllocationsToRelease != nil)
-	assert.Assert(t, request.Releases.AllocationAsksToRelease != nil)
 	assert.Equal(t, len(request.Releases.AllocationsToRelease), 1)
-	assert.Equal(t, len(request.Releases.AllocationAsksToRelease), 1)
 	assert.Equal(t, request.Releases.AllocationsToRelease[0].ApplicationID, "app01")
 	assert.Equal(t, request.Releases.AllocationsToRelease[0].AllocationKey, "task01")
 	assert.Equal(t, request.Releases.AllocationsToRelease[0].PartitionName, "default")
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].ApplicationID, "app01")
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].AllocationKey, "task01")
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].PartitionName, "default")
+	assert.Equal(t, request.Releases.AllocationsToRelease[0].TerminationType, si.TerminationType_STOPPED_BY_RM)
 
-	// without allocationKey
-	request = CreateReleaseRequestForTask("app01", "task01", "", "default", "STOPPED_BY_RM")
+	request = CreateReleaseRequestForTask("app01", "task01", "default", si.TerminationType_UNKNOWN_TERMINATION_TYPE)
 	assert.Assert(t, request.Releases != nil)
-	assert.Assert(t, request.Releases.AllocationsToRelease == nil)
-	assert.Assert(t, request.Releases.AllocationAsksToRelease != nil)
-	assert.Equal(t, len(request.Releases.AllocationsToRelease), 0)
-	assert.Equal(t, len(request.Releases.AllocationAsksToRelease), 1)
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].ApplicationID, "app01")
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].AllocationKey, "task01")
-	assert.Equal(t, request.Releases.AllocationAsksToRelease[0].PartitionName, "default")
+	assert.Assert(t, request.Releases.AllocationsToRelease != nil)
+	assert.Equal(t, len(request.Releases.AllocationsToRelease), 1)
+	assert.Equal(t, request.Releases.AllocationsToRelease[0].ApplicationID, "app01")
+	assert.Equal(t, request.Releases.AllocationsToRelease[0].AllocationKey, "task01")
+	assert.Equal(t, request.Releases.AllocationsToRelease[0].PartitionName, "default")
+	assert.Equal(t, request.Releases.AllocationsToRelease[0].TerminationType, si.TerminationType_UNKNOWN_TERMINATION_TYPE)
 }
 
 func TestCreateUpdateRequestForRemoveApplication(t *testing.T) {
@@ -97,14 +92,14 @@ func TestCreateUpdateRequestForTask(t *testing.T) {
 	}
 
 	updateRequest := CreateAllocationRequestForTask("appId1", "taskId1", res, false, "", pod, false, preemptionPolicy)
-	asks := updateRequest.Asks
+	asks := updateRequest.Allocations
 	assert.Equal(t, len(asks), 1)
 	allocAsk := asks[0]
 	assert.Assert(t, allocAsk != nil)
 	assert.Assert(t, allocAsk.PreemptionPolicy != nil)
 	assert.Equal(t, allocAsk.PreemptionPolicy.AllowPreemptSelf, true)
 	assert.Equal(t, allocAsk.PreemptionPolicy.AllowPreemptOther, true)
-	tags := allocAsk.Tags
+	tags := allocAsk.AllocationTags
 	assert.Assert(t, tags != nil)
 	assert.Equal(t, tags[common.DomainK8s+common.GroupMeta+"podName"], podName)
 	assert.Equal(t, tags[common.DomainK8s+common.GroupMeta+"namespace"], namespace)
@@ -214,41 +209,12 @@ func TestCreateTagsForTask(t *testing.T) {
 	assert.Equal(t, len(result4), 4)
 }
 
-func TestCreateUpdateRequestForNewNode(t *testing.T) {
-	capacity := NewResourceBuilder().AddResource(common.Memory, 200).AddResource(common.CPU, 2).Build()
-	occupied := NewResourceBuilder().AddResource(common.Memory, 50).AddResource(common.CPU, 1).Build()
-	var existingAllocations []*si.Allocation
-	nodeLabels := map[string]string{
-		"label1":                           "key1",
-		"label2":                           "key2",
-		"node.kubernetes.io/instance-type": "HighMem",
-	}
-	request := CreateUpdateRequestForNewNode(nodeID, nodeLabels, capacity, occupied, existingAllocations)
-	assert.Equal(t, len(request.Nodes), 1)
-	assert.Equal(t, request.Nodes[0].NodeID, nodeID)
-	assert.Equal(t, request.Nodes[0].SchedulableResource, capacity)
-	assert.Equal(t, request.Nodes[0].OccupiedResource, occupied)
-	assert.Equal(t, len(request.Nodes[0].Attributes), 6)
-	assert.Equal(t, request.Nodes[0].Attributes[constants.DefaultNodeAttributeHostNameKey], nodeID)
-	assert.Equal(t, request.Nodes[0].Attributes[constants.DefaultNodeAttributeRackNameKey], constants.DefaultRackName)
-
-	// Make sure include nodeLabel
-	assert.Equal(t, request.Nodes[0].Attributes["label1"], "key1")
-	assert.Equal(t, request.Nodes[0].Attributes["label2"], "key2")
-	assert.Equal(t, request.Nodes[0].Attributes["node.kubernetes.io/instance-type"], "HighMem")
-
-	// Make sure include the instanceType
-	assert.Equal(t, request.Nodes[0].Attributes[common.InstanceType], "HighMem")
-}
-
 func TestCreateUpdateRequestForUpdatedNode(t *testing.T) {
 	capacity := NewResourceBuilder().AddResource(common.Memory, 200).AddResource(common.CPU, 2).Build()
-	occupied := NewResourceBuilder().AddResource(common.Memory, 50).AddResource(common.CPU, 1).Build()
-	request := CreateUpdateRequestForUpdatedNode(nodeID, capacity, occupied)
+	request := CreateUpdateRequestForUpdatedNode(nodeID, capacity)
 	assert.Equal(t, len(request.Nodes), 1)
 	assert.Equal(t, request.Nodes[0].NodeID, nodeID)
 	assert.Equal(t, request.Nodes[0].SchedulableResource, capacity)
-	assert.Equal(t, request.Nodes[0].OccupiedResource, occupied)
 	assert.Equal(t, len(request.Nodes[0].Attributes), 0)
 }
 
@@ -299,7 +265,7 @@ func TestCreateAllocationRequestForTask(t *testing.T) {
 	}
 
 	updateRequest := CreateAllocationRequestForTask("appId1", "taskId1", res, false, "", pod, false, preemptionPolicy)
-	asks := updateRequest.Asks
+	asks := updateRequest.Allocations
 	assert.Equal(t, len(asks), 1)
 	allocAsk := asks[0]
 	if allocAsk == nil {
@@ -332,7 +298,7 @@ func TestCreateAllocationRequestForTask(t *testing.T) {
 	}
 
 	updateRequest1 := CreateAllocationRequestForTask("appId1", "taskId1", res, false, "", pod1, false, preemptionPolicy1)
-	asks1 := updateRequest1.Asks
+	asks1 := updateRequest1.Allocations
 	assert.Equal(t, len(asks1), 1)
 	allocAsk1 := asks1[0]
 	if allocAsk1 == nil {
@@ -341,7 +307,7 @@ func TestCreateAllocationRequestForTask(t *testing.T) {
 	assert.Assert(t, allocAsk1.PreemptionPolicy != nil)
 	assert.Equal(t, allocAsk1.PreemptionPolicy.AllowPreemptSelf, true)
 	assert.Equal(t, allocAsk1.PreemptionPolicy.AllowPreemptOther, false)
-	tags := allocAsk1.Tags
+	tags := allocAsk1.AllocationTags
 	assert.Equal(t, tags[common.DomainK8s+common.GroupMeta+"podName"], podName1)
 	assert.Equal(t, allocAsk1.Priority, int32(100))
 }
@@ -423,4 +389,111 @@ func TestCreateAllocationForTask(t *testing.T) {
 	tags := alloc1.AllocationTags
 	assert.Equal(t, tags[common.DomainK8s+common.GroupMeta+"podName"], podName1)
 	assert.Equal(t, alloc1.Priority, int32(100))
+}
+
+// TestGetTerminationTypeFromString tests the GetTerminationTypeFromString function.
+func TestGetTerminationTypeFromString(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected si.TerminationType
+	}{
+		{"UNKNOWN_TERMINATION_TYPE", si.TerminationType_UNKNOWN_TERMINATION_TYPE},
+		{"STOPPED_BY_RM", si.TerminationType_STOPPED_BY_RM},
+		{"TIMEOUT", si.TerminationType_TIMEOUT},
+		{"PREEMPTED_BY_SCHEDULER", si.TerminationType_PREEMPTED_BY_SCHEDULER},
+		{"PLACEHOLDER_REPLACED", si.TerminationType_PLACEHOLDER_REPLACED},
+		{"INVALID_TYPE", si.TerminationType_STOPPED_BY_RM},
+		{"", si.TerminationType_STOPPED_BY_RM},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			result := GetTerminationTypeFromString(test.input)
+			if result != test.expected {
+				t.Errorf("For input '%s', expected %v, got %v", test.input, test.expected, result)
+			}
+		})
+	}
+}
+
+func TestCreateAllocationForForeignPod(t *testing.T) {
+	cResources := make(map[v1.ResourceName]resource.Quantity)
+	cResources[v1.ResourceMemory] = resource.MustParse("500M")
+	cResources[v1.ResourceCPU] = resource.MustParse("1")
+	var containers []v1.Container
+	containers = append(containers, v1.Container{
+		Name: "container-01",
+		Resources: v1.ResourceRequirements{
+			Requests: cResources,
+		},
+	})
+
+	pod := &v1.Pod{
+		TypeMeta: apis.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: apis.ObjectMeta{
+			Name: "test",
+			UID:  "UID-00001",
+			CreationTimestamp: apis.Time{
+				Time: time.Unix(1, 0),
+			},
+			Labels: map[string]string{
+				"testKey": "testValue",
+			},
+			Namespace: "testNamespace",
+		},
+		Spec: v1.PodSpec{
+			Containers: containers,
+			NodeName:   nodeID,
+		},
+	}
+
+	allocReq := CreateAllocationForForeignPod(pod)
+	assert.Equal(t, 1, len(allocReq.Allocations))
+	assert.Equal(t, "mycluster", allocReq.RmID)
+	assert.Assert(t, allocReq.Releases == nil)
+	alloc := allocReq.Allocations[0]
+	assert.Equal(t, nodeID, alloc.NodeID)
+	assert.Equal(t, "UID-00001", alloc.AllocationKey)
+	assert.Equal(t, int32(0), alloc.Priority)
+	res := alloc.ResourcePerAlloc
+	assert.Equal(t, 3, len(res.Resources))
+	assert.Equal(t, int64(500000000), res.Resources["memory"].Value)
+	assert.Equal(t, int64(1000), res.Resources["vcore"].Value)
+	assert.Equal(t, int64(1), res.Resources["pods"].Value)
+	assert.Equal(t, 5, len(alloc.AllocationTags))
+	assert.Equal(t, "1", alloc.AllocationTags[common.CreationTime])
+	assert.Equal(t, alloc.AllocationTags["kubernetes.io/meta/namespace"], "testNamespace")
+	assert.Equal(t, alloc.AllocationTags["kubernetes.io/meta/podName"], "test")
+	assert.Equal(t, alloc.AllocationTags["kubernetes.io/label/testKey"], "testValue")
+
+	// set priority & change pod type to static
+	prio := int32(12)
+	pod.Spec.Priority = &prio
+	pod.OwnerReferences = []apis.OwnerReference{
+		{
+			Kind: "Node",
+		},
+	}
+	allocReq = CreateAllocationForForeignPod(pod)
+	assert.Equal(t, 5, len(alloc.AllocationTags))
+	alloc = allocReq.Allocations[0]
+	assert.Equal(t, common.AllocTypeStatic, alloc.AllocationTags[common.Foreign])
+	assert.Equal(t, int32(12), alloc.Priority)
+}
+
+func TestCreateReleaseRequestForForeignPod(t *testing.T) {
+	allocReq := CreateReleaseRequestForForeignPod("UID-0001", "partition")
+
+	assert.Assert(t, allocReq.Releases != nil)
+	assert.Equal(t, "mycluster", allocReq.RmID)
+	releaseReq := allocReq.Releases
+	assert.Equal(t, 1, len(releaseReq.AllocationsToRelease))
+	release := releaseReq.AllocationsToRelease[0]
+	assert.Equal(t, "UID-0001", release.AllocationKey)
+	assert.Equal(t, "partition", release.PartitionName)
+	assert.Equal(t, si.TerminationType_STOPPED_BY_RM, release.TerminationType)
+	assert.Equal(t, "pod terminated", release.Message)
 }
